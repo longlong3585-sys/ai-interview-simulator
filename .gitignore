@@ -1,0 +1,48 @@
+# 环境变量（含 API Key）
+.env
+*.env.local
+*.env.production
+
+# 数据库文件
+*.db
+*.sqlite
+*.sqlite3
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+venv/
+.venv/
+
+# Node
+node_modules/
+dist/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# 上传文件
+uploads/avatars/*
+!uploads/avatars/.gitkeep
+
+# 日志文件
+*.log
+logs/
+
+# 测试脚本
+**/test_*.py
+
+# 环境覆盖文件
+docker-compose.override.yml

@@ -1,0 +1,96 @@
+{
+  "后端开发": [
+    { "text": "解释 RESTful API 的设计原则。", "difficulty": "中", "tags": ["API", "设计"] },
+    { "text": "什么是数据库索引？如何优化？", "difficulty": "高", "tags": ["数据库", "性能"] },
+    { "text": "简述 Spring Boot 自动配置原理。", "difficulty": "高", "tags": ["Java", "Spring"] },
+    { "text": "如何处理高并发场景下的缓存穿透？", "difficulty": "高", "tags": ["缓存", "并发"] },
+    { "text": "说说你用过哪些消息队列，有什么区别？", "difficulty": "中", "tags": ["MQ", "架构"] },
+    { "text": "什么是微服务？微服务架构的优缺点？", "difficulty": "中", "tags": ["架构"] },
+    { "text": "分布式系统中如何保证数据一致性？", "difficulty": "高", "tags": ["分布式", "一致性"] },
+    { "text": "谈谈你对 CAP 定理的理解。", "difficulty": "高", "tags": ["分布式", "理论"] },
+    { "text": "SQL 注入是什么？如何防范？", "difficulty": "中", "tags": ["安全", "SQL"] },
+    { "text": "Redis 的数据结构有哪些？分别适用于什么场景？", "difficulty": "中", "tags": ["Redis", "缓存"] }
+  ],
+  "前端开发": [
+    { "text": "什么是虚拟 DOM？它的优点是什么？", "difficulty": "中", "tags": ["React", "性能"] },
+    { "text": "简述 CSS 盒模型。", "difficulty": "低", "tags": ["CSS"] },
+    { "text": "解释闭包及其在前端中的应用。", "difficulty": "中", "tags": ["JavaScript"] },
+    { "text": "谈谈 React Hooks 的使用原则。", "difficulty": "中", "tags": ["React"] },
+    { "text": "什么是跨域？如何解决？", "difficulty": "中", "tags": ["网络"] },
+    { "text": "浏览器从输入 URL 到页面展示发生了什么？", "difficulty": "高", "tags": ["浏览器", "网络"] },
+    { "text": "什么是事件循环？", "difficulty": "中", "tags": ["JavaScript"] },
+    { "text": "Vue3 和 React 的主要区别？", "difficulty": "中", "tags": ["框架对比"] },
+    { "text": "TypeScript 中 type 和 interface 的区别？", "difficulty": "中", "tags": ["TypeScript"] },
+    { "text": "什么是 Webpack？Vite 相比它有什么优势？", "difficulty": "中", "tags": ["构建工具"] }
+  ],
+  "算法工程师": [
+    { "text": "快速排序的时间复杂度是多少？最坏情况如何避免？", "difficulty": "中", "tags": ["排序"] },
+    { "text": "解释梯度下降法的原理。", "difficulty": "高", "tags": ["机器学习"] },
+    { "text": "动态规划和贪心算法的区别。", "difficulty": "高", "tags": ["算法"] },
+    { "text": "如何判断链表是否有环？", "difficulty": "中", "tags": ["数据结构"] },
+    { "text": "什么是过拟合？如何防止？", "difficulty": "高", "tags": ["机器学习"] },
+    { "text": "解释 Attention 机制。", "difficulty": "高", "tags": ["深度学习"] },
+    { "text": "二叉树的遍历有哪些方式？", "difficulty": "中", "tags": ["树", "遍历"] },
+    { "text": "解释 Transformer 模型的核心结构。", "difficulty": "高", "tags": ["NLP", "Transformer"] },
+    { "text": "LRU 缓存淘汰策略如何实现？", "difficulty": "中", "tags": ["缓存", "数据结构"] }
+  ],
+  "全栈开发": [
+    { "text": "解释 JWT 的工作原理。", "difficulty": "中", "tags": ["认证"] },
+    { "text": "如何设计一个高可用的系统？", "difficulty": "高", "tags": ["架构"] },
+    { "text": "Session 与 Cookie 的区别。", "difficulty": "中", "tags": ["认证"] },
+    { "text": "什么是 CSRF 攻击？如何防范？", "difficulty": "高", "tags": ["安全"] },
+    { "text": "谈谈你对前后端分离的理解。", "difficulty": "中", "tags": ["架构"] },
+    { "text": "什么是 Serverless？它的优缺点？", "difficulty": "中", "tags": ["Serverless"] },
+    { "text": "GraphQL 和 REST 的区别？", "difficulty": "中", "tags": ["API"] }
+  ],
+  "移动开发": [
+    { "text": "Android 四大组件是什么？", "difficulty": "中", "tags": ["Android"] },
+    { "text": "React Native 的桥接原理是什么？", "difficulty": "高", "tags": ["RN"] },
+    { "text": "Activity 的生命周期是怎样的？", "difficulty": "中", "tags": ["Android"] },
+    { "text": "iOS 中的自动布局（Auto Layout）原理是什么？", "difficulty": "高", "tags": ["iOS"] },
+    { "text": "什么是热更新？", "difficulty": "低", "tags": ["跨平台"] },
+    { "text": "Flutter 的渲染机制是怎样的？", "difficulty": "高", "tags": ["Flutter"] },
+    { "text": "移动端性能优化有哪些策略？", "difficulty": "中", "tags": ["性能"] }
+  ],
+  "测试开发": [
+    { "text": "什么是单元测试？如何编写好的单元测试？", "difficulty": "中", "tags": ["测试"] },
+    { "text": "解释黑盒测试和白盒测试的区别。", "difficulty": "中", "tags": ["测试理论"] },
+    { "text": "如何设计测试用例？", "difficulty": "中", "tags": ["测试设计"] },
+    { "text": "什么是 CI/CD？", "difficulty": "低", "tags": ["DevOps"] },
+    { "text": "谈谈你对自动化测试的理解。", "difficulty": "中", "tags": ["自动化"] },
+    { "text": "单元测试和集成测试的区别？", "difficulty": "低", "tags": ["测试"] },
+    { "text": "如何提高测试覆盖率？", "difficulty": "中", "tags": ["覆盖率"] }
+  ],
+  "运维开发": [
+    { "text": "解释 Docker 和虚拟机的区别。", "difficulty": "中", "tags": ["容器"] },
+    { "text": "什么是 Kubernetes？它的核心组件有哪些？", "difficulty": "高", "tags": ["K8s"] },
+    { "text": "Linux 中如何查看进程和端口？", "difficulty": "低", "tags": ["Linux"] },
+    { "text": "如何排查服务 CPU 飙升问题？", "difficulty": "高", "tags": ["运维"] },
+    { "text": "什么是 Infrastructure as Code？", "difficulty": "中", "tags": ["DevOps"] },
+    { "text": "如何实现自动化部署？", "difficulty": "中", "tags": ["CI/CD"] },
+    { "text": "什么是蓝绿部署和金丝雀发布？", "difficulty": "高", "tags": ["部署策略"] }
+  ],
+  "数据工程": [
+    { "text": "解释 Hadoop 和 Spark 的区别。", "difficulty": "高", "tags": ["大数据"] },
+    { "text": "什么是数据仓库？", "difficulty": "中", "tags": ["数据工程"] },
+    { "text": "如何处理数据倾斜问题？", "difficulty": "高", "tags": ["大数据"] },
+    { "text": "解释 ETL 流程。", "difficulty": "中", "tags": ["数据工程"] },
+    { "text": "数据仓库和数据库的区别？", "difficulty": "中", "tags": ["数据仓库"] },
+    { "text": "什么是数据湖？与数据仓库有何不同？", "difficulty": "中", "tags": ["数据湖"] }
+  ],
+  "机器学习工程师": [
+    { "text": "监督学习和无监督学习的区别？", "difficulty": "低", "tags": ["ML"] },
+    { "text": "CNN 和 RNN 的适用场景？", "difficulty": "中", "tags": ["深度学习"] },
+    { "text": "正则化的作用是什么？有哪些方法？", "difficulty": "中", "tags": ["正则化"] },
+    { "text": "什么是特征工程？为什么重要？", "difficulty": "中", "tags": ["特征工程"] },
+    { "text": "解释 Batch Normalization 的原理。", "difficulty": "高", "tags": ["深度学习"] },
+    { "text": "AUC 和 F1 分数的区别？", "difficulty": "中", "tags": ["评估指标"] }
+  ],
+  "嵌入式开发": [
+    { "text": "RTOS 的特点是什么？", "difficulty": "中", "tags": ["RTOS"] },
+    { "text": "中断和轮询的区别？", "difficulty": "低", "tags": ["硬件"] },
+    { "text": "I2C 和 SPI 的区别？", "difficulty": "中", "tags": ["总线"] },
+    { "text": "什么是 DMA？它的优势是什么？", "difficulty": "中", "tags": ["DMA"] },
+    { "text": "嵌入式系统中的内存管理有何特点？", "difficulty": "高", "tags": ["内存"] }
+  ]
+}
