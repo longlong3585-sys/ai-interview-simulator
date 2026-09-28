@@ -5,54 +5,92 @@
 不得自行 `from services.stores.sqlite_store import ...`。
 
 这样将来把 SQLite 换成 Redis 时，改动面是"新增一个实现类 + 改这里的几行"，
-而不是"翻遍业务代码"。装配点还适合放**启动期自检**（见下）。
+而不是"翻遍业务代码"。装配点还负责**启动期自检**（见 `_assemble`）。
+
+逃生舱触发阈值见 docs/02-architecture-v2.md §2.8：
+    多台应用服务器 / database is locked > 1 次每日 / 峰值写 > 50/s / 活跃会话 > 1000
 """
 
 import os
 
-from services.stores.base import SessionStore
+from services.stores.base import CaptchaStore, SessionStore
+from services.stores.sqlite_captcha_store import SQLiteCaptchaStore
 from services.stores.sqlite_store import SQLiteSessionStore
 
-#: 逃生舱阈值见 docs/02-architecture-v2.md §2.8
-_OVERRIDE_ENV = "SESSION_STORE_BACKEND"
+#: 装配表：kind -> (环境变量, 协议, 中文名, sqlite 实现类)
+#: T-21 的限流存储往这里加一行即可，装配逻辑不用改。
+_REGISTRY = {
+    "session": (
+        "SESSION_STORE_BACKEND", SessionStore, "会话存储", SQLiteSessionStore,
+    ),
+    "captcha": (
+        "CAPTCHA_STORE_BACKEND", CaptchaStore, "验证码存储", SQLiteCaptchaStore,
+    ),
+}
 
-_session_store = None
+_instances = {}
 
 
-def get_session_store():
-    """返回会话存储（进程内单例）。
+def _assemble(kind):
+    """按 `_REGISTRY` 装配一个存储实现，并做**协议自检**。"""
+    env_name, protocol, label, sqlite_impl = _REGISTRY[kind]
+    backend = os.getenv(env_name, "sqlite").strip().lower()
 
-    实现由 `SESSION_STORE_BACKEND` 选择，目前只支持 `sqlite`（默认）。
-    未来新增 Redis 实现时在这里加一个分支即可，业务代码一行都不用改。
-    """
-    global _session_store
-    backend = os.getenv(_OVERRIDE_ENV, "sqlite").strip().lower()
-
-    if _session_store is not None:
-        return _session_store
-
-    if backend == "sqlite":
-        store = SQLiteSessionStore()
-    else:
+    if backend != "sqlite":
         raise RuntimeError(
-            "未知的 %s=%r（当前仅支持 'sqlite'）" % (_OVERRIDE_ENV, backend)
+            "未知的 %s=%r（%s当前仅支持 'sqlite'）" % (env_name, backend, label)
         )
 
-    # 装配期自检：实现必须满足协议，且实现类不得漏方法。
-    # `SessionStore` 是 @runtime_checkable 的，所以这句是真的在检查
-    # （T-16 专门为此写了用例）。放在这里，是为了让"实现漏了方法"
-    # 在**启动时**就炸，而不是等某个接口第一次被调用。
-    if not isinstance(store, SessionStore):
+    store = sqlite_impl()
+
+    # 装配期自检：实现必须满足协议。
+    # `SessionStore` / `CaptchaStore` 都是 @runtime_checkable 的，所以这句
+    # 是真的在检查（T-16 专门为此写了用例）。放在这里，是为了让
+    # "实现漏了方法" 在**启动时**就炸，而不是等某个接口第一次被调用。
+    if not isinstance(store, protocol):
         raise RuntimeError(
-            "%s 未满足 SessionStore 协议 —— 检查是否漏实现某个方法"
-            % type(store).__name__
+            "%s 未满足 %s 协议 —— 检查是否漏实现某个方法"
+            % (type(store).__name__, protocol.__name__)
         )
 
-    _session_store = store
+    _instances[kind] = store
     return store
 
 
+def get_session_store():
+    """返回会话存储（进程内单例）。实现由 `SESSION_STORE_BACKEND` 选择。"""
+    if "session" not in _instances:
+        _assemble("session")
+    return _instances["session"]
+
+
+def get_captcha_store():
+    """返回验证码存储（进程内单例）。实现由 `CAPTCHA_STORE_BACKEND` 选择。"""
+    if "captcha" not in _instances:
+        _assemble("captcha")
+    return _instances["captcha"]
+
+
+def reset_stores():
+    """仅供测试：清掉全部单例，让下次调用重新装配。"""
+    _instances.clear()
+
+
 def reset_session_store():
-    """仅供测试：清掉单例，让下次调用重新装配。"""
-    global _session_store
-    _session_store = None
+    """仅供测试：只清会话存储单例（T-19 引入，保留以兼容既有用例）。"""
+    _instances.pop("session", None)
+
+
+def reset_captcha_store():
+    """仅供测试：只清验证码存储单例。"""
+    _instances.pop("captcha", None)
+
+
+# 预留：T-21 会在这里注册限流存储
+__all__ = [
+    "get_session_store",
+    "get_captcha_store",
+    "reset_stores",
+    "reset_session_store",
+    "reset_captcha_store",
+]
