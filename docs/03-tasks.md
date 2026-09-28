@@ -39,6 +39,7 @@
 | T-14 | ✅ 已完成 | 2026-09-29 | 见 git log | **偏离 ADR-009**：PyPI+4 镜像全不可达，Alembic 装不上 → 用户批准自建 runner（ADR-009R）。`migrations/runner.py` + `versions/001_baseline.py` + `scripts/migrate.py`；**零新增依赖**。移除 `database.py` 的 `create_all()`+手写 ALTER。**15 项测试**；破坏性验证抓到 2 个真实弱点（回滚断言过弱、dry-run 写库）并已修正 |
 | T-13 | ✅ 已完成 | 2026-09-29 | `46987b1` | 后端提取 `SKIP_WORDS` 常量 + 新增 `GET /api/interview/config`；前端删除硬编码列表改为拉取。**后端 9 项 + 前端 6 项**；**破坏性验证：20 个 subTest 失败**。检测规则含正/负样本自检 |
 | T-15 | ✅ 已完成 | 2026-09-29 | `93ed0b3` + 补充提交 | engine 运行契约：WAL + `busy_timeout=15000` + `synchronous=NORMAL` + `foreign_keys=ON` + `BEGIN IMMEDIATE`。**13 项测试**；**破坏性验证：6 个探针全部被抓住**。⚠️ 实测修正 ADR-002 的一处不准确说法：仅 `create_engine(isolation_level=None)` **不够**，须在 connect 事件里设 `dbapi_conn.isolation_level=None`。⚠️ **补充提交**：第二轮探针发现 `PRAGMA busy_timeout` 一行在引擎路径上属"观测冗余"（`sqlite3.connect(timeout=15.0)` 自带同样效果），已补判别性用例 + 独立库测试。⚠️ 已知代价：全局 `BEGIN IMMEDIATE` 使**经由本引擎的并发事务串行化**（WAL 纯读不受影响），已写成用例显式记录。**交付物**：`scripts/verify_t15.py`（人工验收工具，29 项）+ `scripts/probes/`（2 个探针复现脚本）。见 ADR-002R |
+| T-16 | ✅ 已完成 | 2026-09-29 | 见 git log | `services/stores/base.py`：**只有协议与数据类型，零实现**。3 个 `@runtime_checkable` Protocol（`SessionStore` 9 方法 / `CaptchaStore` 3 / `RateLimitStore` 4）+ 4 个 frozen dataclass + 类型化异常 + ISO 时间契约。**26 项测试**（依赖面只在标准库白名单内、禁止 SQL 泄露、方法名与**参数名**逐一断言、鸭子类型可 `isinstance`、frozen 不可变、ISO 字典序==时间序、`is_expired` 边界 `<=`）。**破坏性验证：9 个探针全部被抓住**。⚠️ 其中 2 个探针首轮是"模块导入失败"造成的**假阳性**，已改为精确命中目标断言（见提交说明）。**边界**：`token_blacklist` 表的协议**刻意不定义**，理由见下方注 |
 
 > **⚠️ 操作教训（T-05 真机验证时踩到，务必记住）**
 > `job_kill` **只杀 pwsh 包装进程，不会杀 uvicorn 的 python 子进程**。残留进程会继续占着 8000 端口，导致：
@@ -92,14 +93,15 @@
 
 ---
 
-## 阶段 2 第一批完成情况（T-14 / T-15）
+## 阶段 2 已完成情况（T-14 ~ T-16）
 
 | 任务 | 提交 | 内容 |
 |---|---|---|
 | T-14 自建迁移 runner（ADR-009R 偏离审批） | `59b7758` | `migrations/runner.py` + `versions/001_baseline.py` + `scripts/migrate.py`；`schema_migrations` 表；五道安全闸（强制备份 / 只读预检 / `BEGIN IMMEDIATE` 事务 / 框架层禁 DROP·DELETE / 幂等）。移除 `database.py` 的 `create_all()` + 手写 ALTER |
 | T-15 engine 运行契约 | `93ed0b3` + 补充提交 | WAL + `busy_timeout=15000` + `synchronous=NORMAL` + `foreign_keys=ON` + `BEGIN IMMEDIATE`；新增 ADR-002R |
+| T-16 存储抽象层协议 | 见 git log | `services/stores/base.py`：3 个 `runtime_checkable` Protocol + 4 个 frozen dataclass + 类型化异常 + ISO 时间契约；**零实现、零第三方依赖、零 SQL** |
 
-**测试规模**：后端 **148 项**（阶段 1 时为 114，本批 +34）＋ 前端 **13 项**，全部通过。
+**测试规模**：后端 **174 项**（阶段 1 结束时 114，阶段 2 已 +60）＋ 前端 **13 项**，全部通过。
 **本批偏差/事故均已记录**：T-14 的 `--dry-run` 曾在真库创建空表（已清理并加固为纯只读）；T-15 修正了 ADR-002 关于 `isolation_level` 的不准确说法，并在第二轮探针中补齐 `busy_timeout` 的判别力缺口（见 ADR-002R）。
 
 **T-15 交付物**
@@ -187,7 +189,7 @@
 |---|---|---|---|---|---|
 | T-14 | **存储重构** | 引入 Alembic → **改为自建轻量 runner**（见 ADR-009R）；建立基线 + runbook | 4h | T-02 | ✅ |
 | T-15 | **存储重构** | engine 配置：WAL + `busy_timeout=15000` + `foreign_keys=ON` + `isolation_level=None` + `BEGIN IMMEDIATE` 事件 | 3h | T-14 | ✅ |
-| T-16 | **存储重构** | `services/stores/` 抽象层协议（`SessionStore`/`CaptchaStore`/`RateLimitStore`） | 2h | T-15 | 🔒 |
+| T-16 | **存储重构** | `services/stores/` 抽象层协议（`SessionStore`/`CaptchaStore`/`RateLimitStore`） | 2h | T-15 | ✅ |
 | T-17 | **存储重构** | 迁移：新增 4 张表（`interview_sessions`/`captcha_store`/`auth_attempts`/`token_blacklist`） | 3h | T-16 | 🔒 |
 | T-18 | **存储重构** | 迁移：既有表变更（`client_token` / `must_change_password` / 删死列 `link_url`） | 3h | T-17 | 🔒 |
 | T-19 | **存储重构** | `SQLiteSessionStore`：乐观锁 `version` + `seq` 幂等 + 状态机 + 短事务 | 4h | T-18 | 🔒 |
@@ -199,7 +201,9 @@
 - T-14：空库执行 `init_db.py` → 全部表建成；既有库备份后 `stamp`+`upgrade` → **数据零丢失**；`alembic check` 无差异
 - T-15：`PRAGMA journal_mode` 返回 `wal`（且文件属性级验证）；`busy_timeout=15000`、`synchronous=NORMAL`、`foreign_keys=ON` 逐连接生效；**行为判别测试**证明发出的是 `BEGIN IMMEDIATE`（短 timeout 原始连接被锁挡住、纯读连接不受阻）。
   ⚠️ 原始验收语"删用户级联删会话"**本任务范围内不成立**：`interview_sessions` 表到 T-17 才建；且 `foreign_keys=ON` 只会**拒绝**违约操作，不会自动级联（除非 `ON DELETE CASCADE`，见 T-19 设计）。本任务实际验收为：**插入不存在用户的记录被拒 + 删除仍有记录的用户被拒**；开启 FK 前已勘察确认真库**0 条孤儿行**。
-- T-16：调用方只依赖协议；提供 SQLite 实现且**不含任何 Redis 代码**
+- T-16：协议层**只依赖标准库**（AST 断言 import 白名单 = {dataclasses, datetime, typing}）；把 `redis`/`sqlalchemy` 等设为 `sys.modules[...]=None` 后仍能导入；无 SQL 关键字泄露（剔除 docstring 后逐行扫描）；3 个协议的方法名与**参数名**逐一断言；不继承也能通过 `isinstance`；dataclass 全部 `frozen=True`；ISO 串字典序 == 时间序。
+  ⚠️ **原始验收语"提供 SQLite 实现"不属于本任务**：实现是 T-19 / T-20 / T-21。T-16 的可验证等价物是"**协议层不绑定任何存储**"（上面那组断言），"不含任何 Redis 代码"则由"只依赖标准库 + 无 Redis API 词汇"共同保证。
+  📌 **刻意不定义 `token_blacklist` 的协议**：该表在 T-17 建，但它挂在 **ADR-003 选 B（P1）** 之下，且 `jti` 是否"续期沿用同一条"（ADR-016 第 5 点）尚未落地。在没有调用方的情况下提前定接口，会把未定的语义**锁死**。等 ADR-003-B 真正开工时再补协议 —— 届时它与 `create_access_token` 的改动属同一批。
 - T-17：4 张表建成；`UNIQUE(user_id) WHERE status='active'` 生效（同用户第二个 active 被拒，`finished`/`abandoned` 可并存）
 - T-18：`client_token` UNIQUE 生效（经 `batch_alter_table`）；死列 `link_url` 已移除；既有数据保留
 - T-19：**并发测试**：两请求同 `version` 并发 → 一个成功、一个 **409**（不静默覆盖）；同 `seq` 重发 → 返回缓存 `last_reply` **且不重复调用 AI**
