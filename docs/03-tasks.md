@@ -23,6 +23,7 @@
 | 任务 | 状态 | 日期 | Commit | 备注 |
 |---|---|---|---|---|
 | T-01 | ✅ 已完成 | 2026-09-28 | `0d58240` | 回滚点 tag `rollback-before-refactor`；`make_backup.py` / `verify_backup.py`；正向 exit 0、**负向测试 exit 1** 均通过 |
+| T-02 | ✅ 已完成 | 2026-09-28 | 见 git log | 移除 `**/test_*.py` 忽略；忽略根目录 `*.docx`；建立 unittest 测试骨架 + **独立测试库隔离**（16 项测试全绿）。**偏差**：PyPI 不可达 → 以 stdlib `unittest` 运行（见 ADR-021R） |
 
 > **🔒 冻结范围**：`backend/database.py`、engine 配置、`SessionLocal`、`create_engine`/PRAGMA/连接池、建表语句、`services/stores/`、Alembic 迁移 —— 即 **阶段 2 全部**，以及**阶段 3 全部**（均依赖新存储）。
 > **解冻条件**：用户审批本清单 → 移除 🔒 → 按依赖顺序开工。
@@ -57,7 +58,7 @@
 | ID | 类别 | 任务 | 工时 | 依赖 | 标记 |
 |---|---|---|---|---|---|
 | T-01 | 基建 | 备份代码与 `interview.db`，打 tag 建立回滚点 | 1h | — | ✅ |
-| T-02 | 基建 | 移除 `.gitignore:45` 的 `**/test_*.py`；建立 pytest 骨架 + 独立测试库 | 2h | T-01 | ⬜ |
+| T-02 | 基建 | 移除 `.gitignore:45` 的 `**/test_*.py`；建立 pytest 骨架 + 独立测试库 | 2h | T-01 | ✅ |
 | T-03 | 基建 | 建立 Vitest + React Testing Library 骨架 | 2h | T-01 | ⬜ |
 
 **验收标准**

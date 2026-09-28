@@ -1,0 +1,17 @@
+# T-02：测试环境依赖（仅开发/CI 需要，生产部署不安装本文件）
+#
+# ⚠️ 当前状态（2026-09-28）：本机 **PyPI 不可达**
+#    （DNS 与 TCP 443 可通，但 TLS 握手被重置；本地代理 127.0.0.1:7897 已失效）
+#    因此 pytest 尚未安装，测试以 Python 标准库 unittest 运行：
+#
+#        cd backend
+#        python -m unittest discover -s tests -t . -v
+#
+#    全部测试用例均写成 unittest.TestCase，pytest 可原生收集，
+#    装好 pytest 后无需修改任何测试代码。
+#
+# 待网络恢复后执行：
+#    backend\venv\Scripts\python.exe -m pip install -r backend\requirements-dev.txt
+# 并将下面的宽松约束收敛为与 runtime 一致的精确版本（==）。
+
+pytest>=8.0,<9

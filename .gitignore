@@ -41,11 +41,11 @@ uploads/avatars/*
 *.log
 logs/
 
-# 测试脚本
-**/test_*.py
-
 # 环境覆盖文件
 docker-compose.override.yml
+
+# 根目录的 Word 文档（T-02：原作者已将其移出版本控制，此处显式忽略以保持 git status 干净）
+/*.docx
 
 # 回滚备份点（T-01）：数据库备份 / 源码归档 / 清单，均不入库
 backup/

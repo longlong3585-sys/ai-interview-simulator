@@ -27,6 +27,7 @@
 | M-6 | `interview_sessions` 增 `ended_reason` 列 | DDL | §4 | 随 M-1 一并审批 |
 | M-7 | NFR-10 提级 P0（绝对地址导致生产全站按钮失效） | 优先级 | ADR-005/ADR-011 | 否（已在 spec 落实） |
 | M-8 | 死代码清理范围确认（`react-router-dom` 启用、`QuestionBank.tsx` 处置） | 技术债 | ADR-005 | 否 |
+| M-9 | **测试运行方式：PyPI 不可达 → 以 stdlib `unittest` 兜底** | 环境约束 | **ADR-021R** | 已记录（§3.5） |
 
 **未受影响的 ADR**：ADR-001、002、003、008、009、010、012~021、023、026 —— **保持不变**，仍以 `02-architecture.md` v2.1 为准。
 
@@ -253,6 +254,35 @@ active ──报告生成成功──────────▶ finished     �
 | ⑭ | `generate_report` **请求体不再传 `messages`**，改为以服务端会话为准（Bug 3A） |
 | ⑮ | 报告响应新增 **`ended_reason`**（`completed`/`timeout`/`manual`） |
 | ⑯ | 渲染层禁止原生对话框，改由 Toast / `ConfirmDialog` 承载（属前端内部契约，但影响 E2E 测试写法） |
+
+---
+
+### 3.5 ADR-021R · 测试运行方式（修订 ADR-021）
+
+**背景（T-02 实测发现）**：本机 **PyPI 不可达** —— DNS 解析正常、`pypi.org:443` TCP 可通，但 **TLS 握手被重置**；注册表中配置的本地代理 `127.0.0.1:7897` 已失效（端口无监听，仅残留 `FIN_WAIT_2`）。因此 **pytest 无法安装**（`pip install pytest` 挂起至超时，venv 内 44 个包中无 pytest）。
+
+| 项 | ADR-021 原设计 | **ADR-021R 修订** |
+|---|---|---|
+| 单元测试框架 | pytest + FastAPI TestClient | **主框架仍为 pytest（未来）**；当前以 **stdlib `unittest`** 运行 |
+| 前端测试 | Vitest + RTL | **不变**（Node 侧依赖已装齐，不受 PyPI 影响） |
+| 运行命令 | `pytest` | **`cd backend && python -m unittest discover -s tests -t . -v`** |
+| 测试库 | 独立文件 SQLite（非内存） | **不变**（已实现，见下） |
+
+**兼容性做法（关键）**：全部用例写成 `unittest.TestCase`，pytest **可原生收集**。同时保留：
+- `backend/pytest.ini`（前向兼容配置）
+- `backend/conftest.py`（pytest 加载时同样先完成环境隔离）
+- `backend/requirements-dev.txt`（记录 pytest 依赖，待网络恢复后安装）
+
+→ **将来网络可用时，只需 `pip install -r requirements-dev.txt`，无需改动任何测试代码。**
+
+**T-02 已落地的环境隔离机制（本轮核心交付）**：
+- `tests/__init__.py` 在**导入任何应用模块之前**把 `DATABASE_URL` 指向临时文件库。
+  依据：`database.py:4` 的 `load_dotenv()` **默认 `override=False`**，故先设置的环境变量不会被 `.env` 覆盖。
+- `tests/test_environment_isolation.py` 把"隔离是否真的生效"变成**可执行断言**：
+  写入探针后比对真实库的 `(mtime, size)` 指纹，若有变化即判失败。
+  这防止了未来"跑一次测试就改写线上数据"的事故。
+
+**影响**：NFR-6 的验收方式不变（"可执行测试 + 可跑"），仅运行器不同。
 
 ---
 
