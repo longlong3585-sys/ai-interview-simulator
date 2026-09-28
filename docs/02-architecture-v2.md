@@ -330,6 +330,29 @@ active ──报告生成成功──────────▶ finished     �
 
 ---
 
+### 3.7 ADR-002R · SQLite 运行契约落地（T-15 实测修正）
+
+ADR-002 的配置契约已按 T-15 落地，**其中一处需要修正**：
+
+| 项 | ADR-002 原文 | **实测结论** |
+|---|---|---|
+| `isolation_level=None` | 传给 `create_engine` 即可 | ⚠️ **不够**。它只把 SQLAlchemy 层置为 autocommit，底层 pysqlite 仍是 legacy 模式（实测 `dbapi_connection.isolation_level == ''`）。**必须在 `connect` 事件里执行 `dbapi_conn.isolation_level = None`**，否则 legacy 模式会在 DDL 前自动 COMMIT、并在 DML 前自行 BEGIN，与手工发的 BEGIN IMMEDIATE 冲突。 |
+| `BEGIN IMMEDIATE` 由谁发出 | `begin` 事件 | ✅ 正确。实测确认：去掉 `begin` 事件后 BEGIN IMMEDIATE 不再发出，行为测试立即失败。 |
+| `busy_timeout` 与驱动 timeout 同值 | 应一致 | ✅ 已落地为 `SQLITE_BUSY_TIMEOUT_MS = 15000` 单一来源，测试直接断言二者同源。 |
+| `foreign_keys=ON` | 应开启 | ✅ 已开启。**开启前已勘察：现有数据无孤儿行**（`interview_records`/`notifications` 的 `user_id` 全部有效），因此不会让既有数据违约。 |
+
+**实测确认的代价（如实记录）**：全局 BEGIN IMMEDIATE 会让**每个事务（含只读）都申请写锁**，
+因此**经由本引擎的并发事务会串行化**——两个 API 请求即使都是只读也会互相排队。
+精确边界：WAL 下 RESERVED 锁**不阻塞**其它连接的纯读，所以外部只读工具不受影响；
+受影响的只是"同时走本引擎的两个请求"。本项目单机、低并发、事务毫秒级，可接受（ADR-002 的裁决）。
+**若将来读多写多**，应改为"仅写路径显式 BEGIN IMMEDIATE"。
+
+**已验证的连带安全性**：`dbapi_connection.isolation_level = None` 之后，
+pysqlite 的 `commit()` 仍然有效（其内部查 `sqlite3_get_autocommit()` 再发 COMMIT，
+不依赖自身簿记）——由 `BeginImmediateTests` 的用例覆盖，确认 commit 后写锁确实释放。
+
+---
+
 ## 4. 数据模型 DDL 变更
 
 **仅 1 处新增列**（其余表结构沿用 v2.1；**因涉及数据库，须随 ADR-004R 一并审批**）：

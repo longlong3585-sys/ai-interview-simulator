@@ -1,4 +1,4 @@
-﻿# 03 · 任务拆解（阶段 5）
+# 03 · 任务拆解（阶段 5）
 
 > **需求依据**：`docs/01-spec.md` **v2.4**（76 条需求：63 FR + 13 NFR；P0=28 / P1=30 / P2=17 / 范围外 1）
 > **架构依据**：`docs/02-architecture.md` v2.1（26 条 ADR）+ `docs/02-architecture-v2.md`（已批准增量）
@@ -15,6 +15,8 @@
 
 > **📌 审批范围（2026-09-28，用户裁决）**：**仅批准阶段 0 + 阶段 1（T-01 ~ T-13）**，这 13 个任务**已解冻**。
 > **阶段 2 及其后所有 🔒 任务继续保持冻结**，待用户验收阶段 1 实际效果后**逐批解冻**。
+> **📌 解冻补充（2026-09-29）**：用户已解冻**阶段 2 第一批**（T-14、T-15）并指定"T-14 先讲计划、T-15 做完给手动验收指令"。
+> 本批 **T-14 / T-15 均已完成**；**T-16 起仍为 🔒 冻结**，待用户手动验收 T-15 后再逐批解冻。
 > **阶段顺序不调整**：T-44 路由化按原计划执行（用户认定它是根治 Bug 2/Bug 3 的前置）。
 > **开工规则（规则 7）**：每次只做一个任务 → 读任务 → 写代码 → 写测试 → 运行测试 → 修复 → 状态改 done → `git commit` → **暂停等"继续下一个任务"**。
 
@@ -36,6 +38,7 @@
 | T-12 | ✅ 已完成 | 2026-09-29 | `1e44bfe` | 新增 `utils/log_setup.py`；异常处理器记录完整堆栈+请求上下文+`error_id`，对外仍只给通用消息。**7 项测试**；**破坏性验证：4/7 失败**。真机证据：客户端无任何泄露、服务端有完整堆栈且 error_id 对应 |
 | T-14 | ✅ 已完成 | 2026-09-29 | 见 git log | **偏离 ADR-009**：PyPI+4 镜像全不可达，Alembic 装不上 → 用户批准自建 runner（ADR-009R）。`migrations/runner.py` + `versions/001_baseline.py` + `scripts/migrate.py`；**零新增依赖**。移除 `database.py` 的 `create_all()`+手写 ALTER。**15 项测试**；破坏性验证抓到 2 个真实弱点（回滚断言过弱、dry-run 写库）并已修正 |
 | T-13 | ✅ 已完成 | 2026-09-29 | `46987b1` | 后端提取 `SKIP_WORDS` 常量 + 新增 `GET /api/interview/config`；前端删除硬编码列表改为拉取。**后端 9 项 + 前端 6 项**；**破坏性验证：20 个 subTest 失败**。检测规则含正/负样本自检 |
+| T-15 | ✅ 已完成 | 2026-09-29 | 见 git log | engine 运行契约：WAL + `busy_timeout=15000` + `synchronous=NORMAL` + `foreign_keys=ON` + `BEGIN IMMEDIATE`。**11 项测试**；**破坏性验证：4 个探针全部被抓住**（其中一个首轮漏网 → 已补直接断言用例）。⚠️ 实测修正 ADR-002 的一处不准确说法：仅 `create_engine(isolation_level=None)` **不够**，须在 connect 事件里设 `dbapi_conn.isolation_level=None`。⚠️ 已知代价：全局 `BEGIN IMMEDIATE` 使**经由本引擎的并发事务串行化**（WAL 纯读不受影响），已写成用例显式记录。见 ADR-002R |
 
 > **⚠️ 操作教训（T-05 真机验证时踩到，务必记住）**
 > `job_kill` **只杀 pwsh 包装进程，不会杀 uvicorn 的 python 子进程**。残留进程会继续占着 8000 端口，导致：
@@ -89,6 +92,18 @@
 
 ---
 
+## 阶段 2 第一批完成情况（T-14 / T-15）
+
+| 任务 | 提交 | 内容 |
+|---|---|---|
+| T-14 自建迁移 runner（ADR-009R 偏离审批） | `59b7758` | `migrations/runner.py` + `versions/001_baseline.py` + `scripts/migrate.py`；`schema_migrations` 表；五道安全闸（强制备份 / 只读预检 / `BEGIN IMMEDIATE` 事务 / 框架层禁 DROP·DELETE / 幂等）。移除 `database.py` 的 `create_all()` + 手写 ALTER |
+| T-15 engine 运行契约 | 见 git log | WAL + `busy_timeout=15000` + `synchronous=NORMAL` + `foreign_keys=ON` + `BEGIN IMMEDIATE`；新增 ADR-002R |
+
+**测试规模**：后端 **146 项**（阶段 1 时为 114，本批 +32）＋ 前端 **13 项**，全部通过。
+**本批两次事故/偏差均已记录**：T-14 的 `--dry-run` 曾在真库创建空表（已清理并加固为纯只读）；T-15 修正了 ADR-002 关于 `isolation_level` 的不准确说法（见 ADR-002R）。
+
+---
+
 ## 依赖关系总览
 
 ```
@@ -96,7 +111,7 @@
    │
    ├──▶ 阶段1 后端安全止血 (T-04~13)  ← 不碰数据库，可立即开工
    │
-   └──▶ 阶段2 存储层重构 🔒 (T-14~22)   ← 全部冻结
+   └──▶ 阶段2 存储层重构 (T-14~22)   ← T-14/T-15 已解冻并完成；T-16 起仍冻结
              │
              └──▶ 阶段3 Bug修复 🔒 (T-23~33)   ← 依赖新存储
                        │
@@ -161,7 +176,7 @@
 | ID | 类别 | 任务 | 工时 | 依赖 | 标记 |
 |---|---|---|---|---|---|
 | T-14 | **存储重构** | 引入 Alembic → **改为自建轻量 runner**（见 ADR-009R）；建立基线 + runbook | 4h | T-02 | ✅ |
-| T-15 | **存储重构** | engine 配置：WAL + `busy_timeout=15000` + `foreign_keys=ON` + `isolation_level=None` + `BEGIN IMMEDIATE` 事件 | 3h | T-14 | 🔒 |
+| T-15 | **存储重构** | engine 配置：WAL + `busy_timeout=15000` + `foreign_keys=ON` + `isolation_level=None` + `BEGIN IMMEDIATE` 事件 | 3h | T-14 | ✅ |
 | T-16 | **存储重构** | `services/stores/` 抽象层协议（`SessionStore`/`CaptchaStore`/`RateLimitStore`） | 2h | T-15 | 🔒 |
 | T-17 | **存储重构** | 迁移：新增 4 张表（`interview_sessions`/`captcha_store`/`auth_attempts`/`token_blacklist`） | 3h | T-16 | 🔒 |
 | T-18 | **存储重构** | 迁移：既有表变更（`client_token` / `must_change_password` / 删死列 `link_url`） | 3h | T-17 | 🔒 |
@@ -172,7 +187,8 @@
 
 **验收标准**
 - T-14：空库执行 `init_db.py` → 全部表建成；既有库备份后 `stamp`+`upgrade` → **数据零丢失**；`alembic check` 无差异
-- T-15：`PRAGMA journal_mode` 返回 `wal`；`foreign_keys=ON` 生效（删用户级联删会话）；日志确认发出 `BEGIN IMMEDIATE`
+- T-15：`PRAGMA journal_mode` 返回 `wal`（且文件属性级验证）；`busy_timeout=15000`、`synchronous=NORMAL`、`foreign_keys=ON` 逐连接生效；**行为判别测试**证明发出的是 `BEGIN IMMEDIATE`（短 timeout 原始连接被锁挡住、纯读连接不受阻）。
+  ⚠️ 原始验收语"删用户级联删会话"**本任务范围内不成立**：`interview_sessions` 表到 T-17 才建；且 `foreign_keys=ON` 只会**拒绝**违约操作，不会自动级联（除非 `ON DELETE CASCADE`，见 T-19 设计）。本任务实际验收为：**插入不存在用户的记录被拒 + 删除仍有记录的用户被拒**；开启 FK 前已勘察确认真库**0 条孤儿行**。
 - T-16：调用方只依赖协议；提供 SQLite 实现且**不含任何 Redis 代码**
 - T-17：4 张表建成；`UNIQUE(user_id) WHERE status='active'` 生效（同用户第二个 active 被拒，`finished`/`abandoned` 可并存）
 - T-18：`client_token` UNIQUE 生效（经 `batch_alter_table`）；死列 `link_url` 已移除；既有数据保留
