@@ -38,7 +38,7 @@
 | T-12 | ✅ 已完成 | 2026-09-29 | `1e44bfe` | 新增 `utils/log_setup.py`；异常处理器记录完整堆栈+请求上下文+`error_id`，对外仍只给通用消息。**7 项测试**；**破坏性验证：4/7 失败**。真机证据：客户端无任何泄露、服务端有完整堆栈且 error_id 对应 |
 | T-14 | ✅ 已完成 | 2026-09-29 | 见 git log | **偏离 ADR-009**：PyPI+4 镜像全不可达，Alembic 装不上 → 用户批准自建 runner（ADR-009R）。`migrations/runner.py` + `versions/001_baseline.py` + `scripts/migrate.py`；**零新增依赖**。移除 `database.py` 的 `create_all()`+手写 ALTER。**15 项测试**；破坏性验证抓到 2 个真实弱点（回滚断言过弱、dry-run 写库）并已修正 |
 | T-13 | ✅ 已完成 | 2026-09-29 | `46987b1` | 后端提取 `SKIP_WORDS` 常量 + 新增 `GET /api/interview/config`；前端删除硬编码列表改为拉取。**后端 9 项 + 前端 6 项**；**破坏性验证：20 个 subTest 失败**。检测规则含正/负样本自检 |
-| T-15 | ✅ 已完成 | 2026-09-29 | 见 git log | engine 运行契约：WAL + `busy_timeout=15000` + `synchronous=NORMAL` + `foreign_keys=ON` + `BEGIN IMMEDIATE`。**11 项测试**；**破坏性验证：4 个探针全部被抓住**（其中一个首轮漏网 → 已补直接断言用例）。⚠️ 实测修正 ADR-002 的一处不准确说法：仅 `create_engine(isolation_level=None)` **不够**，须在 connect 事件里设 `dbapi_conn.isolation_level=None`。⚠️ 已知代价：全局 `BEGIN IMMEDIATE` 使**经由本引擎的并发事务串行化**（WAL 纯读不受影响），已写成用例显式记录。见 ADR-002R |
+| T-15 | ✅ 已完成 | 2026-09-29 | `93ed0b3` + 补充提交 | engine 运行契约：WAL + `busy_timeout=15000` + `synchronous=NORMAL` + `foreign_keys=ON` + `BEGIN IMMEDIATE`。**13 项测试**；**破坏性验证：6 个探针全部被抓住**。⚠️ 实测修正 ADR-002 的一处不准确说法：仅 `create_engine(isolation_level=None)` **不够**，须在 connect 事件里设 `dbapi_conn.isolation_level=None`。⚠️ **补充提交**：第二轮探针发现 `PRAGMA busy_timeout` 一行在引擎路径上属"观测冗余"（`sqlite3.connect(timeout=15.0)` 自带同样效果），已补判别性用例 + 独立库测试。⚠️ 已知代价：全局 `BEGIN IMMEDIATE` 使**经由本引擎的并发事务串行化**（WAL 纯读不受影响），已写成用例显式记录。**交付物**：`scripts/verify_t15.py`（人工验收工具，29 项）+ `scripts/probes/`（2 个探针复现脚本）。见 ADR-002R |
 
 > **⚠️ 操作教训（T-05 真机验证时踩到，务必记住）**
 > `job_kill` **只杀 pwsh 包装进程，不会杀 uvicorn 的 python 子进程**。残留进程会继续占着 8000 端口，导致：
@@ -97,10 +97,20 @@
 | 任务 | 提交 | 内容 |
 |---|---|---|
 | T-14 自建迁移 runner（ADR-009R 偏离审批） | `59b7758` | `migrations/runner.py` + `versions/001_baseline.py` + `scripts/migrate.py`；`schema_migrations` 表；五道安全闸（强制备份 / 只读预检 / `BEGIN IMMEDIATE` 事务 / 框架层禁 DROP·DELETE / 幂等）。移除 `database.py` 的 `create_all()` + 手写 ALTER |
-| T-15 engine 运行契约 | 见 git log | WAL + `busy_timeout=15000` + `synchronous=NORMAL` + `foreign_keys=ON` + `BEGIN IMMEDIATE`；新增 ADR-002R |
+| T-15 engine 运行契约 | `93ed0b3` + 补充提交 | WAL + `busy_timeout=15000` + `synchronous=NORMAL` + `foreign_keys=ON` + `BEGIN IMMEDIATE`；新增 ADR-002R |
 
-**测试规模**：后端 **146 项**（阶段 1 时为 114，本批 +32）＋ 前端 **13 项**，全部通过。
-**本批两次事故/偏差均已记录**：T-14 的 `--dry-run` 曾在真库创建空表（已清理并加固为纯只读）；T-15 修正了 ADR-002 关于 `isolation_level` 的不准确说法（见 ADR-002R）。
+**测试规模**：后端 **148 项**（阶段 1 时为 114，本批 +34）＋ 前端 **13 项**，全部通过。
+**本批偏差/事故均已记录**：T-14 的 `--dry-run` 曾在真库创建空表（已清理并加固为纯只读）；T-15 修正了 ADR-002 关于 `isolation_level` 的不准确说法，并在第二轮探针中补齐 `busy_timeout` 的判别力缺口（见 ADR-002R）。
+
+**T-15 交付物**
+| 文件 | 用途 |
+|---|---|
+| `backend/scripts/verify_t15.py` | **人工验收工具（零风险）**：29 项独立复算，默认在真库副本上跑，真库只做 `mode=ro` 只读核对 |
+| `backend/scripts/smoke_t15.py` | **真机只读冒烟**：13 项，走 HTTP→engine→SQLite 全链路，含"接口数字 == 直接读库数字"的跨层一致性核对 |
+| `backend/scripts/journal_mode.py` | 查看 / 切换 `journal_mode`（先 checkpoint 再切换；有其它连接时主动拒绝） |
+| `backend/scripts/probes/probe_t15_harness.py` | 对验收工具做 6 个破坏性探针（注入缺陷→确认会失败→ `try/finally` 还原→sha256 校验） |
+| `backend/scripts/probes/probe_t15_tests.py` | 对 `tests/test_sqlite_engine_config.py` 做同样 6 个探针 |
+| `docs/t15-manual-verification.md` | **人工验收指令**（用户明确要求），每条指令均本机实跑过 |
 
 ---
 

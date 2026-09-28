@@ -10,6 +10,7 @@
 import os
 import sqlite3
 import sys
+import tempfile
 import unittest
 
 from sqlalchemy import text
@@ -27,7 +28,30 @@ def pragma(conn, name):
     return conn.execute(text("PRAGMA " + name)).scalar()
 
 
-class EngineConfigTests(unittest.TestCase):
+class _FreshDbMixin(object):
+    """给用例一个**独立的一次性库文件**，不碰测试主库。
+
+    为什么必须独立：测试主库被 engine 连接池持有，WAL 下无法在同一文件上
+    执行 `PRAGMA journal_mode=DELETE`（实测报 database is locked）。
+    用新文件还多验证了一件事 —— **全新空库也能被设为 WAL**。
+    """
+
+    def fresh_db(self):
+        fd, path = tempfile.mkstemp(prefix="t15-unit-", suffix=".db")
+        os.close(fd)
+        self.addCleanup(self._cleanup_fresh, path)
+        return path
+
+    @staticmethod
+    def _cleanup_fresh(path):
+        for suffix in ("", "-wal", "-shm"):
+            try:
+                os.remove(path + suffix)
+            except OSError:
+                pass
+
+
+class EngineConfigTests(_FreshDbMixin, unittest.TestCase):
 
     def test_isolation_level_is_none(self):
         """必须交出事务控制权，否则下面的 begin 事件发不出 BEGIN IMMEDIATE。"""
@@ -75,6 +99,66 @@ class EngineConfigTests(unittest.TestCase):
             self.assertEqual(pragma(conn, "busy_timeout"), database.SQLITE_BUSY_TIMEOUT_MS)
             self.assertEqual(pragma(conn, "synchronous"), 1, "应为 NORMAL(=1)")
             self.assertEqual(pragma(conn, "foreign_keys"), 1, "外键必须开启")
+
+    def test_busy_timeout_pragma_is_actually_issued(self):
+        """直接验证 `PRAGMA busy_timeout` 这一行**本身**被执行。
+
+        为什么需要这个"多余"的用例：破坏性验证发现，把
+        `cursor.execute("PRAGMA busy_timeout=%d" % ...)` 整行删掉，
+        **没有任何引擎级断言会失败** —— 因为
+        `sqlite3.connect(timeout=15.0)` 自己就把 busy_timeout 设成了 15000
+        （实测：timeout=0.001 -> 1ms，timeout=5.0 -> 5000ms，timeout=15.0 -> 15000ms）。
+        两者同源于 SQLITE_BUSY_TIMEOUT_MS，因此黑盒观测永远一致，
+        这行 PRAGMA 在引擎路径上是**观测冗余**的（保留作为防御性冗余：
+        万一将来有人改 connect_args 而不改这里，PRAGMA 仍能兜住）。
+
+        要让这行可被独立测出，必须绕开驱动层的 timeout：
+        用 timeout=0.001 的原始连接调用 `_apply_sqlite_pragmas`，
+        此时 before=1、after=15000，判别力成立。
+        """
+        raw = sqlite3.connect(self.fresh_db(), timeout=0.001)
+        try:
+            before = raw.execute("PRAGMA busy_timeout").fetchone()[0]
+            self.assertEqual(before, 1, "前置条件：驱动层 timeout 应只给出 1ms")
+            database._apply_sqlite_pragmas(raw, None)
+            after = raw.execute("PRAGMA busy_timeout").fetchone()[0]
+            self.assertEqual(
+                after, database.SQLITE_BUSY_TIMEOUT_MS,
+                "PRAGMA busy_timeout 必须把驱动层的值拉到 SQLITE_BUSY_TIMEOUT_MS",
+            )
+            self.assertNotEqual(before, after, "本用例的判别力依赖 before != after")
+        finally:
+            raw.close()
+
+    def test_apply_sqlite_pragmas_sets_everything_on_a_bare_connection(self):
+        """`_apply_sqlite_pragmas` 对一条"裸"连接必须完成全部设置。
+
+        用**全新的空库**：既能断言"新库也被设为 WAL"，又避免与连接池争锁。
+        """
+        raw = sqlite3.connect(self.fresh_db(), timeout=0.001)
+        try:
+            self.assertEqual(raw.execute("PRAGMA foreign_keys").fetchone()[0], 0,
+                             "前置条件：外键默认关闭（这正是修复前的 bug 状态）")
+            self.assertNotEqual(
+                str(raw.execute("PRAGMA journal_mode").fetchone()[0]).lower(), "wal",
+                "前置条件：新库默认不是 WAL",
+            )
+
+            database._apply_sqlite_pragmas(raw, None)
+
+            self.assertEqual(str(raw.execute("PRAGMA journal_mode").fetchone()[0]).lower(), "wal")
+            self.assertEqual(raw.execute("PRAGMA busy_timeout").fetchone()[0],
+                             database.SQLITE_BUSY_TIMEOUT_MS)
+            self.assertEqual(raw.execute("PRAGMA synchronous").fetchone()[0], 1)
+            self.assertEqual(raw.execute("PRAGMA foreign_keys").fetchone()[0], 1)
+            self.assertIsNone(raw.isolation_level, "DBAPI 必须退出 legacy 事务模式")
+
+            # 幂等：重复应用不应报错，结果一致
+            database._apply_sqlite_pragmas(raw, None)
+            self.assertEqual(raw.execute("PRAGMA busy_timeout").fetchone()[0],
+                             database.SQLITE_BUSY_TIMEOUT_MS)
+        finally:
+            raw.close()
 
     def test_wal_persists_on_file(self):
         """WAL 是库文件属性：换一个**原始** sqlite3 连接也应看到 wal。"""

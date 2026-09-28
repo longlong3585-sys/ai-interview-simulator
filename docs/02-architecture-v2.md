@@ -351,6 +351,42 @@ ADR-002 的配置契约已按 T-15 落地，**其中一处需要修正**：
 pysqlite 的 `commit()` 仍然有效（其内部查 `sqlite3_get_autocommit()` 再发 COMMIT，
 不依赖自身簿记）——由 `BeginImmediateTests` 的用例覆盖，确认 commit 后写锁确实释放。
 
+**补充实测（破坏性验证第二轮发现，2026-09-29）**：把 6 行配置逐行删除做探针，
+发现 **`cursor.execute("PRAGMA busy_timeout=%d")` 这一行在引擎路径上是「观测冗余」的**：
+
+| 事实 | 实测数据 |
+|---|---|
+| `sqlite3.connect(timeout=N)` **自身**就会设置 busy_timeout | `timeout=0.001 → 1ms`；`timeout=5.0 → 5000ms`；`timeout=15.0 → 15000ms` |
+| 两者同源于 `SQLITE_BUSY_TIMEOUT_MS` | `SQLITE_CONNECT_ARGS["timeout"] = SQLITE_BUSY_TIMEOUT_MS / 1000` |
+| 结论 | 删掉该 PRAGMA，引擎上观测到的 busy_timeout **仍是 15000** → 任何引擎级断言都抓不到 |
+
+**处置**（不删该行，而是补足判别力）：
+- **保留**该 PRAGMA 作为防御性冗余 —— 若将来有人只改 `connect_args` 而不动这里，
+  PRAGMA 仍能兜住；且它让"期望值"在代码里显式可见。
+- **新增判别性用例**：用 `timeout=0.001` 的**裸连接**（绕开驱动层 timeout）调用
+  `_apply_sqlite_pragmas()`，断言 `busy_timeout` 从 `1` 变为 `15000`。
+  判别力已在探针中验证：删掉该行后此用例失败（`before=1 after=1`）。
+- **测试用独立的一次性库文件**，不与连接池争锁 —— 池持有的连接在 WAL 下会阻止
+  同一文件上的 `PRAGMA journal_mode=DELETE`（实测 `database is locked`）；
+  独立文件同时多验证了"**全新空库也会被设为 WAL**"。
+
+**第二轮探针结果（6 个缺陷全部被抓住）**：
+
+| 探针（删除的配置） | 单元测试失败数 | 验收工具失败数 |
+|---|---|---|
+| `PRAGMA foreign_keys=ON` | 5 | 5 |
+| `dbapi_conn.isolation_level = None` | 2 | 2 |
+| `begin` 事件的 `BEGIN IMMEDIATE` | 2 | 2 |
+| `PRAGMA journal_mode=WAL` | 3 | 4 |
+| `PRAGMA busy_timeout=N` | 2 | 2 |
+| `PRAGMA synchronous=NORMAL` | 2 | 2 |
+
+> ⚠️ 首轮探针曾把 `journal_mode=WAL` 与 `busy_timeout` 报为「漏网」。复查后：
+> `journal_mode` 实为**探针执行器的缺陷**（`os.system` + 文件重定向的读取失败被
+> 静默吞掉，误显示为"无汇总行"），改用 `subprocess` 管道后正常抓住；
+> `busy_timeout` 则是**真实的判别力缺口**，已按上述方式补齐。
+> 教训：**探针自身的失败也必须被验证**，否则"漏网"与"探针坏了"无法区分。
+
 ---
 
 ## 4. 数据模型 DDL 变更
