@@ -22,7 +22,7 @@
 
 | 任务 | 状态 | 日期 | Commit | 备注 |
 |---|---|---|---|---|
-| T-01 | ✅ 已完成 | 2026-09-28 | `4de27f7` | 回滚点 tag `rollback-before-refactor`（74a28ea → 4de27f7）；`make_backup.py` / `verify_backup.py`；正向 exit 0、**负向测试 exit 1** 均通过 |
+| T-01 | ✅ 已完成 | 2026-09-28 | `0d58240` | 回滚点 tag `rollback-before-refactor`；`make_backup.py` / `verify_backup.py`；正向 exit 0、**负向测试 exit 1** 均通过 |
 
 > **🔒 冻结范围**：`backend/database.py`、engine 配置、`SessionLocal`、`create_engine`/PRAGMA/连接池、建表语句、`services/stores/`、Alembic 迁移 —— 即 **阶段 2 全部**，以及**阶段 3 全部**（均依赖新存储）。
 > **解冻条件**：用户审批本清单 → 移除 🔒 → 按依赖顺序开工。
