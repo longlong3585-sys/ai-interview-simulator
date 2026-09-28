@@ -9,9 +9,8 @@ class ChatRequest(BaseModel):
     resume_context: str = ""
     resume_questions: list = []
     # T-04：user_id 已移除 —— 身份一律由 JWT 解析（FR-2.4）。
-    # 保留该字段会让调用方误以为可以指定用户，是安全隐患。
-    # 客户端若仍发送该字段，Pydantic v2 默认忽略（extra='ignore'），不会报错。
-    action: str = "chat"  # 死参数，待 T-11 清理（FR-4.9）
+    # T-11：action 已移除 —— 后端从未读取过它（前端曾传 'start'，纯死参数）。
+    # 客户端若仍发送这些多余字段，Pydantic v2 默认忽略（extra='ignore'），不会报错。
 
 
 class SaveInterviewRequest(BaseModel):
@@ -34,4 +33,5 @@ class ProfileUpdate(BaseModel):
 
 class ReportRequest(BaseModel):
     messages: list
-    user_id: Optional[int] = None
+    # T-11：user_id 已移除 —— 后端从未读取（generate_report 只用 req.messages
+    # 与 current_user.id 定位会话）。保留会造成"可指定他人"的误导。

@@ -597,14 +597,15 @@ function App() {
     setInput('');
     setLoading(true);
     try {
+      // T-11 / FR-4.9：移除死参数
+      //   user_id —— 后端自 T-04 起一律从 JWT 取身份，不再读该字段
+      //   action  —— 后端从未读取过（原先在下方传 'start'）
       const bodyObj: any = {
         message: input,
         role: role,
-        user_id: _userId,
       };
       if (!interviewStarted && messages.length === 0 && resumeFullText) {
         bodyObj.resume_context = resumeFullText;
-        bodyObj.action = 'start';
       }
       const res = await authFetch('/api/chat', {
         method: 'POST',
@@ -823,7 +824,8 @@ function App() {
       const res = await authFetch('/api/generate_report', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ messages: currentMessages, user_id: _userId })
+        // T-11 / FR-4.9：移除死参数 user_id（后端从不读取，身份来自 JWT）
+        body: JSON.stringify({ messages: currentMessages })
       });
       const data = await res.json();
       setReport(data);
