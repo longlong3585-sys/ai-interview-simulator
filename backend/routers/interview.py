@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from auth import get_db, get_current_user, get_current_admin_user, require_user
 from models.schemas import ChatRequest, ReportRequest, SaveInterviewRequest
 from utils.ai_helpers import client, extract_json_from_response, generate_questions, clean_resume_text
+from utils.safe_json import safe_json_loads
 from database import User, InterviewRecord
 from config import MAX_FILE_SIZE
 
@@ -137,7 +138,13 @@ async def start_interview(
     resume_text: str = Form(""),
     questions_json: str = Form("[]")
 ):
-    questions_list = json.loads(questions_json)
+    # T-10 / FR-6.4：此处原先直接 json.loads(questions_json)，
+    # 客户端传非 JSON 会让整个请求 500。改为容错解析并返回可读的 400。
+    questions_list = safe_json_loads(questions_json, default=None)
+    if questions_list is None:
+        raise HTTPException(status_code=400, detail="questions_json 不是合法的 JSON")
+    if not isinstance(questions_list, list):
+        raise HTTPException(status_code=400, detail="questions_json 必须是 JSON 数组")
     if not questions_list:
         questions_list = generate_questions(resume_text)
 

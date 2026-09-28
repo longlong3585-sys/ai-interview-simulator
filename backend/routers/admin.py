@@ -8,6 +8,7 @@ from sqlalchemy import func
 from auth import get_db, get_current_admin_user, get_password_hash, validate_password
 from models.schemas import InterviewUpdateRequest
 from database import User, InterviewRecord, Notification
+from utils.safe_json import safe_json_loads
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
@@ -70,7 +71,7 @@ def admin_get_users(db: Session = Depends(get_db), current_user: User = Depends(
 @router.get("/interviews")
 def admin_get_interviews(db: Session = Depends(get_db), current_user: User = Depends(get_current_admin_user)):
     records = db.query(InterviewRecord).order_by(InterviewRecord.created_at.desc()).all()
-    return [{"id": r.id, "user_id": r.user_id, "username": r.user.username if r.user else "未知", "role": r.role, "status": r.status, "admin_comment": r.admin_comment, "report": json.loads(r.report) if r.report else None, "created_at": r.created_at.isoformat()} for r in records]
+    return [{"id": r.id, "user_id": r.user_id, "username": r.user.username if r.user else "未知", "role": r.role, "status": r.status, "admin_comment": r.admin_comment, "report": safe_json_loads(r.report), "created_at": r.created_at.isoformat()} for r in records]
 
 
 @router.patch("/interviews/{interview_id}")

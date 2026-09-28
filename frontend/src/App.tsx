@@ -1445,9 +1445,16 @@ function App() {
                   <span className="text-xs text-slate-400">{new Date(h.created_at).toLocaleDateString()}</span>
                 </div>
                 <div className="flex items-center gap-3 text-sm">
-                  <span className={`font-bold text-sm ${h.report.overall_score >= 7 ? 'text-emerald-600' : h.report.overall_score >= 4 ? 'text-amber-600' : 'text-red-600'}`}>
-                    得分 {h.report.overall_score}/10
-                  </span>
+                  {/* T-10 / FR-6.4：report 可能为 null（后端已容错返回 null）。
+                      修复前这里直接访问 h.report.overall_score，
+                      一条 report 为 NULL 的历史记录就会让整个页面白屏。 */}
+                  {h.report ? (
+                    <span className={`font-bold text-sm ${h.report.overall_score >= 7 ? 'text-emerald-600' : h.report.overall_score >= 4 ? 'text-amber-600' : 'text-red-600'}`}>
+                      得分 {h.report.overall_score}/10
+                    </span>
+                  ) : (
+                    <span className="text-xs text-slate-400">该记录无评估报告</span>
+                  )}
                   {h.status && (
                     <span className={`px-2 py-0.5 text-xs rounded-full font-medium ${h.status === 'approved' ? 'bg-emerald-100 text-emerald-700' : h.status === 'rejected' ? 'bg-red-100 text-red-700' : 'bg-amber-100 text-amber-700'}`}>
                       {h.status === 'approved' ? '已通过' : h.status === 'rejected' ? '未通过' : '待审核'}
@@ -1457,13 +1464,19 @@ function App() {
                 </div>
                 {expandedHistoryId === h.id && (
                   <div className="mt-3 pt-3 border-t border-slate-100 text-xs space-y-2">
-                    <div className="flex gap-4">
-                      <span className="text-slate-500">表达能力 <span className="font-bold text-slate-800">{h.report.expression_score}/10</span></span>
-                      <span className="text-slate-500">技术深度 <span className="font-bold text-slate-800">{h.report.technical_score}/10</span></span>
-                      <span className="text-slate-500">逻辑思维 <span className="font-bold text-slate-800">{h.report.logic_score}/10</span></span>
-                    </div>
-                    {h.report.details && <p className="text-slate-600 bg-slate-50 p-3 rounded-xl border border-slate-100 leading-relaxed">📋 {h.report.details}</p>}
-                    {h.report.suggestion && <p className="text-amber-700 bg-amber-50 p-3 rounded-xl border border-amber-200 leading-relaxed">💡 {h.report.suggestion}</p>}
+                    {h.report ? (
+                      <>
+                        <div className="flex gap-4">
+                          <span className="text-slate-500">表达能力 <span className="font-bold text-slate-800">{h.report.expression_score}/10</span></span>
+                          <span className="text-slate-500">技术深度 <span className="font-bold text-slate-800">{h.report.technical_score}/10</span></span>
+                          <span className="text-slate-500">逻辑思维 <span className="font-bold text-slate-800">{h.report.logic_score}/10</span></span>
+                        </div>
+                        {h.report.details && <p className="text-slate-600 bg-slate-50 p-3 rounded-xl border border-slate-100 leading-relaxed">📋 {h.report.details}</p>}
+                        {h.report.suggestion && <p className="text-amber-700 bg-amber-50 p-3 rounded-xl border border-amber-200 leading-relaxed">💡 {h.report.suggestion}</p>}
+                      </>
+                    ) : (
+                      <p className="text-slate-400">该记录没有评估报告（可能因生成失败或数据异常）。</p>
+                    )}
                     {h.admin_comment && <p className="text-blue-700 bg-blue-50 p-3 rounded-xl border border-blue-200 leading-relaxed">✏ 管理员评语：{h.admin_comment}</p>}
                   </div>
                 )}

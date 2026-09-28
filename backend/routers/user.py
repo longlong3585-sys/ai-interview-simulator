@@ -1,4 +1,3 @@
-import json
 import os
 import uuid
 from datetime import timedelta
@@ -10,6 +9,7 @@ from auth import get_db, get_current_user, require_user, verify_password, get_pa
 from config import MAX_AVATAR_SIZE
 from models.schemas import ProfileUpdate
 from database import User, InterviewRecord, Notification
+from utils.safe_json import safe_json_loads
 from utils.upload_validation import (
     detect_image_type,
     extension_is_allowed,
@@ -119,12 +119,14 @@ def get_user_stats(
     total = len(records)
     scores = []
     for r in records:
-        try:
-            report = json.loads(r.report)
-            if 'overall_score' in report:
+        # T-10 / FR-6.4：统一走 safe_json_loads（原先是一个裸 try/except: pass，
+        # 会连 KeyboardInterrupt 一起吞掉，且与历史接口口径不一致）
+        report = safe_json_loads(r.report)
+        if isinstance(report, dict) and 'overall_score' in report:
+            try:
                 scores.append(float(report['overall_score']))
-        except:
-            pass
+            except (TypeError, ValueError):
+                continue
     avg = sum(scores) / len(scores) if scores else 0
     return {"total_interviews": total, "avg_score": round(avg, 1)}
 
@@ -150,7 +152,10 @@ def change_password(
 @router.get("/history")
 def get_history(db: Session = Depends(get_db), current_user: User = Depends(require_user)):
     records = db.query(InterviewRecord).filter(InterviewRecord.user_id == current_user.id).order_by(InterviewRecord.created_at.desc()).all()
-    return [{"id": r.id, "role": r.role, "created_at": r.created_at.isoformat(), "report": json.loads(r.report), "status": r.status, "admin_comment": r.admin_comment} for r in records]
+    # T-10 / FR-6.4：report 是 TEXT 列，可能为 NULL 或存量脏数据。
+    # 原先直接 json.loads(r.report) —— report 为 NULL 会抛 TypeError，
+    # 单条坏记录即可让整个历史列表 500。
+    return [{"id": r.id, "role": r.role, "created_at": r.created_at.isoformat(), "report": safe_json_loads(r.report), "status": r.status, "admin_comment": r.admin_comment} for r in records]
 
 
 @router.get("/history_item/{record_id}")
@@ -158,7 +163,8 @@ def get_history_item(record_id: int, db: Session = Depends(get_db), current_user
     record = db.query(InterviewRecord).filter(InterviewRecord.id == record_id, InterviewRecord.user_id == current_user.id).first()
     if not record:
         raise HTTPException(status_code=404, detail="该面试记录已不存在")
-    return {"id": record.id, "role": record.role, "created_at": record.created_at.isoformat(), "report": json.loads(record.report), "status": record.status, "admin_comment": record.admin_comment}
+    # T-10 / FR-6.4：同上，改为容错解析（NULL / 非法 JSON 均返回 None）
+    return {"id": record.id, "role": record.role, "created_at": record.created_at.isoformat(), "report": safe_json_loads(record.report), "status": record.status, "admin_comment": record.admin_comment}
 
 
 @router.get("/notifications")
