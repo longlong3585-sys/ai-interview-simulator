@@ -23,12 +23,34 @@ UPLOAD_DIR = "uploads/avatars"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 
+# T-13 / FR-4.10：跳过词的**单一来源**。
+#
+# 修复前前端 App.tsx 与服务端各硬编码一份完全相同的列表 —— 一旦有人只改一侧，
+# 用户"打跳过词"的行为在前端本地判定与后端判定之间就会分歧，且不会有任何报错。
+# 现在以本常量为唯一来源，经 GET /api/interview/config 下发给前端
+# （跨进程无法共享常量，故选下发而非导入）。
+SKIP_WORDS = [
+    "不会", "忘记了", "不知道", "不了解", "没学过", "没接触过", "没经验",
+    "太难", "换一个", "换个", "换道", "简单的", "跳过去", "跳过吧", "略过",
+    "答不上", "答不出来", "搞不定", "想不起来", "没做过", "换个简单", "下一题", "跳过",
+]
+
+
 def _is_skip_message(user_message: str) -> bool:
     lower_msg = user_message.strip().lower()
-    skip_words = ["不会", "忘记了", "不知道", "不了解", "没学过", "没接触过", "没经验",
-                  "太难", "换一个", "换个", "换道", "简单的", "跳过去", "跳过吧", "略过",
-                  "答不上", "答不出来", "搞不定", "想不起来", "没做过", "换个简单", "下一题", "跳过"]
-    return any(word in lower_msg for word in skip_words)
+    return any(word in lower_msg for word in SKIP_WORDS)
+
+
+@router.get("/interview/config")
+def get_interview_config(current_user: User = Depends(get_current_user)):
+    """T-13 / FR-4.10：向前端下发面试相关常量，避免前后端各存一份。
+
+    需要登录（不在 §3.1 的公开白名单内）—— 这些常量只服务于面试流程，
+    而面试流程本身就必须登录。
+    """
+    return {
+        "skip_words": list(SKIP_WORDS),
+    }
 
 
 @router.post("/chat")

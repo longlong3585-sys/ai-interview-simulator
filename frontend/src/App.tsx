@@ -466,6 +466,8 @@ function App() {
   const [showQuestionBank, setShowQuestionBank] = useState(false);
   const [selectedBankCategory, setSelectedBankCategory] = useState('后端开发');
   const [questionBank, setQuestionBank] = useState<Record<string, { text: string; difficulty: string; tags: string[] }[]>>({});
+  // T-13 / FR-4.10：跳过词由后端 GET /api/interview/config 下发（单一来源）
+  const [skipWords, setSkipWords] = useState<string[]>([]);
   const [questionBankLoading, setQuestionBankLoading] = useState(false);
   
   // 用户认证
@@ -587,9 +589,10 @@ function App() {
     if (!input.trim() || loading || !hasResume || !token) return;
 
     const lowerInput = input.trim().toLowerCase();
-    const skipWords = ['不会', '忘记了', '不知道', '不了解', '没学过', '没接触过', '没经验',
-      '太难', '换一个', '换个', '换道', '简单的', '跳过去', '跳过吧', '略过',
-      '答不上', '答不出来', '搞不定', '想不起来', '没做过', '换个简单', '下一题', '跳过'];
+    // T-13 / FR-4.10：跳过词不再硬编码，改由后端 GET /api/interview/config 下发
+    // （详见 loadInterviewConfig）。此处只做本地 UI 状态标记；
+    // **权威判定仍在后端**（_is_skip_message），因此即使配置尚未加载完成，
+    // 面试流程本身也不受影响，仅本地题目状态点可能显示为 answered 而非 skipped。
     const isSkip = skipWords.some(w => lowerInput.includes(w));
 
     const userMessage = { role: 'user', content: input };
@@ -1007,6 +1010,23 @@ function App() {
     }
   };
 
+  // T-13 / FR-4.10：面试相关常量的唯一来源是后端。
+  // 原先前端把 23 个跳过词硬编码在 sendMessage 里，与后端各存一份，
+  // 任一侧改动都会造成"本地判定"与"服务端判定"分歧且无任何报错。
+  const loadInterviewConfig = async (tok: string) => {
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/interview/config`, {
+        headers: { 'Authorization': `Bearer ${tok}` }
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data.skip_words)) setSkipWords(data.skip_words);
+      }
+    } catch (err) {
+      console.error('面试配置加载失败', err);
+    }
+  };
+
   const loadUserProfile = async (tok: string) => {
     try {
       const [profileRes, statsRes] = await Promise.all([
@@ -1274,6 +1294,9 @@ function App() {
         loadUnreadCount(token);
       }
       loadUserProfile(token);
+      // T-13 / FR-4.10：登录后即拉取面试常量（跳过词等），
+      // 早于任何面试流程，避免"配置尚未加载就开始答题"的窗口期
+      loadInterviewConfig(token);
     }
   }, [token, userRole]);
 

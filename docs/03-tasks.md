@@ -27,6 +27,7 @@
 | T-03 | ✅ 已完成 | 2026-09-28 | 见 git log | Vitest+RTL 配置**待激活**（npm registry 不可达）；当前以零依赖 `node:test` 运行**契约测试 7 项全绿**（跳过词一致性 / API 路径对齐 / 匹配器判别力）。`tsc -b` 与 `vite build` 均 EXIT=0（测试文件置于 `src/` 外，不破坏构建） |
 | T-04 | ✅ 已完成 | 2026-09-28 | 见 git log | `/api/chat` 挂 `require_user` + 身份改用 `current_user.id`；`ChatRequest.user_id` 已移除。**9 项测试**（含伪造 user_id 无效）；**破坏性验证：移除鉴权后 8/9 失败**。真机验证：无 token→401、伪造 user_id→被忽略 |
 | T-05 | ✅ 已完成 | 2026-09-29 | 见 git log | `/api/resume/upload` 挂 `get_current_user`（**刻意不用 `require_user`**，否则 admin 会被 403）。**10 项测试**；**破坏性验证：移除鉴权后 3/10 失败**。真机验证：无 token→401、带 token+txt→400、DOCX→200、**admin→200**；OpenAPI schema 现已声明 security。顺带抽出 `tests/support.py` 消重 |
+| T-13 | ✅ 已完成 | 2026-09-29 | 见 git log | 后端提取 `SKIP_WORDS` 常量 + 新增 `GET /api/interview/config`；前端删除硬编码列表改为拉取。**后端 9 项 + 前端 6 项**；**破坏性验证：20 个 subTest 失败**。检测规则含正/负样本自检 |
 | T-12 | ✅ 已完成 | 2026-09-29 | 见 git log | 新增 `utils/log_setup.py`；异常处理器记录完整堆栈+请求上下文+`error_id`，对外仍只给通用消息。**7 项测试**；**破坏性验证：4/7 失败**。真机证据：客户端无任何泄露、服务端有完整堆栈且 error_id 对应 |
 | T-11 | ✅ 已完成 | 2026-09-29 | 见 git log | 后端移除 `ChatRequest.action` 与 `ReportRequest.user_id`；前端移除对应发送。**后端 7 项 + 前端契约 3 项**（含识别规则自检）；**破坏性验证：加回字段后 2/7 失败**；保留向后兼容（extra 字段被忽略） |
 | T-10 | ✅ 已完成 | 2026-09-29 | 见 git log | 新增 `utils/safe_json.py`；修复历史列表/详情 500，并统一 stats、管理端列表、start_interview 非法 JSON→400；前端历史列表加 `report ?` 守卫防白屏。**13 项测试**；**破坏性验证：13 项全部报错** |
@@ -103,7 +104,7 @@
 | T-10 | **修复 Bug** | 统一 `safe_json_loads()`，修复 `user.py:110,118` 空值保护（FR-6.4） | 2h | T-02 | ✅ |
 | T-11 | **修复 Bug** | 死参数清理：后端删 `action`（`ChatRequest.user_id` 已于 T-04 移除）与 `ReportRequest.user_id`，前端同步移除 | 2h | T-04 | ✅ |
 | T-12 | **修复 Bug** | 全局异常处理器记录堆栈到日志，对外仍返回通用消息（NFR-2） | 1h | — | ✅ |
-| T-13 | **新功能** | 跳过词单一来源：后端常量 + `GET /api/interview/config`（FR-4.10） | 2h | T-02 | ⬜ |
+| T-13 | **新功能** | 跳过词单一来源：后端常量 + `GET /api/interview/config`（FR-4.10） | 2h | T-02 | ✅ |
 
 **验收标准**
 - T-04：无 token 调 `/api/chat` → **401**；请求体传他人 `user_id` **不产生任何影响**；伪造 id 无法读写他人会话
