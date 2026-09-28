@@ -52,5 +52,8 @@ CAPTCHA_LOCK_MINUTES = 10
 
 MAX_FILE_SIZE = 5 * 1024 * 1024
 
+# T-09 / FR-10.4：头像后端大小上限，与前端 canvas 裁剪后提交的 2MB 限制保持一致
+MAX_AVATAR_SIZE = 2 * 1024 * 1024
+
 UPLOAD_DIR = "uploads/avatars"
 QUESTION_BANK_FILE = os.path.join(os.path.dirname(__file__), "question_bank.json")

@@ -27,6 +27,7 @@
 | T-03 | ✅ 已完成 | 2026-09-28 | 见 git log | Vitest+RTL 配置**待激活**（npm registry 不可达）；当前以零依赖 `node:test` 运行**契约测试 7 项全绿**（跳过词一致性 / API 路径对齐 / 匹配器判别力）。`tsc -b` 与 `vite build` 均 EXIT=0（测试文件置于 `src/` 外，不破坏构建） |
 | T-04 | ✅ 已完成 | 2026-09-28 | 见 git log | `/api/chat` 挂 `require_user` + 身份改用 `current_user.id`；`ChatRequest.user_id` 已移除。**9 项测试**（含伪造 user_id 无效）；**破坏性验证：移除鉴权后 8/9 失败**。真机验证：无 token→401、伪造 user_id→被忽略 |
 | T-05 | ✅ 已完成 | 2026-09-29 | 见 git log | `/api/resume/upload` 挂 `get_current_user`（**刻意不用 `require_user`**，否则 admin 会被 403）。**10 项测试**；**破坏性验证：移除鉴权后 3/10 失败**。真机验证：无 token→401、带 token+txt→400、DOCX→200、**admin→200**；OpenAPI schema 现已声明 security。顺带抽出 `tests/support.py` 消重 |
+| T-09 | ✅ 已完成 | 2026-09-29 | 见 git log | 新增 `utils/upload_validation.py`；四道服务端校验（白名单/边读边限/魔数/统一重命名）+ 替换时清理旧文件；刻意不支持 SVG（XSS）。**15 项测试**；**破坏性验证：10/15 失败**。uploads/ 未被测试污染 |
 | T-08 | ✅ 已完成 | 2026-09-29 | 见 git log | 后端新增 `validate_password()` 单一来源并接入注册/改密/重置；前端抽出 `utils/passwordRules.ts` 修掉 3 份重复实现（改密原为 ≥6）。**10 项测试**含三处口径一致性断言；**破坏性验证：10 项 subTest 全失败**。⚠️ 破坏性脚本曾超时残留探针，已还原并改用 try/finally |
 | T-07 | ✅ 已完成 | 2026-09-29 | 见 git log | `SECRET_KEY` 移除硬编码回退 + 拒绝 3 个文档占位符 + 长度下限 32。**8 项测试**；**破坏性验证：还原旧写法后 7/8 失败**。回归确认现有 .env 仍可用 |
 | T-06 | ✅ 已完成 | 2026-09-29 | 见 git log | `get_current_user` 增加 `is_active` 校验（**改在鉴权链最底层，一处覆盖三条依赖链**）。**10 项测试**；**破坏性验证：移除校验后 10/10 全部失败**（迄今最强）。真机验证：启用→200、禁用→**401「账号已被禁用」**、其他 3 个接口同样 401、重新启用→200。测试期间临时禁用过真实用户 123，**已确认还原为 is_active=1** |
@@ -95,7 +96,7 @@
 | T-06 | **修复 Bug** | `get_current_user` 增加 `is_active` 校验（FR-2.6） | 1h | T-02 | ✅ |
 | T-07 | **修复 Bug** | `SECRET_KEY` 缺失即启动失败，移除硬编码回退（NFR-1c） | 1h | — | ✅ |
 | T-08 | **修复 Bug** | 抽出 `validate_password()`，注册/改密共用同一规则（FR-1.1/1.5） | 3h | T-02 | ✅ |
-| T-09 | **修复 Bug** | 头像上传后端校验：≤2MB + 魔数 + 扩展名白名单 + 统一重命名（FR-10.4） | 3h | T-02 | ⬜ |
+| T-09 | **修复 Bug** | 头像上传后端校验：≤2MB + 魔数 + 扩展名白名单 + 统一重命名（FR-10.4） | 3h | T-02 | ✅ |
 | T-10 | **修复 Bug** | 统一 `safe_json_loads()`，修复 `user.py:110,118` 空值保护（FR-6.4） | 2h | T-02 | ⬜ |
 | T-11 | **修复 Bug** | 死参数清理：后端删 `action`（`ChatRequest.user_id` 已于 T-04 移除）与 `ReportRequest.user_id`，前端同步移除 | 2h | T-04 | ⬜ |
 | T-12 | **修复 Bug** | 全局异常处理器记录堆栈到日志，对外仍返回通用消息（NFR-2） | 1h | — | ⬜ |

@@ -1,6 +1,5 @@
 import json
 import os
-import shutil
 import uuid
 from datetime import timedelta
 
@@ -8,8 +7,15 @@ from fastapi import APIRouter, Depends, HTTPException, Form, UploadFile, File
 from sqlalchemy.orm import Session
 
 from auth import get_db, get_current_user, require_user, verify_password, get_password_hash, validate_password
+from config import MAX_AVATAR_SIZE
 from models.schemas import ProfileUpdate
 from database import User, InterviewRecord, Notification
+from utils.upload_validation import (
+    detect_image_type,
+    extension_is_allowed,
+    is_managed_avatar_url,
+    safe_avatar_filename,
+)
 
 router = APIRouter(prefix="/api", tags=["user"])
 
@@ -56,13 +62,48 @@ async def upload_avatar(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    if not file.content_type.startswith("image/"):
-        raise HTTPException(status_code=400, detail="只支持图片文件")
-    ext = os.path.splitext(file.filename)[1] if file.filename else ".jpg"
-    filename = f"user_{current_user.id}_{uuid.uuid4().hex}{ext}"
+    # T-09 / FR-10.4：修复前这里只检查 file.content_type.startswith("image/")，
+    # 而 content_type 是**客户端可任意伪造**的请求头；且完全没有大小校验，
+    # 并按客户端提供的扩展名原样写入静态目录 —— 可无界写盘、可在 /uploads 下
+    # 落地 .html 等可执行内容。以下四道校验全部改为服务端判定：
+    #   1) 扩展名白名单（便宜的预筛）
+    #   2) 大小上限（**边读边限**，避免把超大文件整个读进内存）
+    #   3) 文件头魔数（真实格式，不信任 content_type）
+    #   4) 统一重命名（扩展名由真实格式决定）
+    if not extension_is_allowed(file.filename):
+        raise HTTPException(status_code=400, detail="仅支持 PNG / JPG / GIF / WebP 图片")
+
+    contents = await file.read(MAX_AVATAR_SIZE + 1)
+    if len(contents) > MAX_AVATAR_SIZE:
+        raise HTTPException(
+            status_code=400,
+            detail="头像文件不能超过 %dMB" % (MAX_AVATAR_SIZE // (1024 * 1024)),
+        )
+
+    detected = detect_image_type(contents)
+    if detected is None:
+        raise HTTPException(
+            status_code=400,
+            detail="文件内容不是有效的图片（仅支持 PNG / JPG / GIF / WebP）",
+        )
+    _mime, ext = detected
+
+    filename = safe_avatar_filename(current_user.id, ext, uuid.uuid4().hex)
     filepath = os.path.join(UPLOAD_DIR, filename)
     with open(filepath, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
+        buffer.write(contents)
+
+    # 替换头像时清理旧文件，避免孤儿文件无界增长（仅删本服务管理的 user_* 文件）
+    old_avatar = current_user.avatar
+    if old_avatar and is_managed_avatar_url(old_avatar, UPLOAD_DIR):
+        old_name = old_avatar[len("/uploads/avatars/"):]
+        old_path = os.path.join(UPLOAD_DIR, old_name)
+        if os.path.normpath(old_path) != os.path.normpath(filepath) and os.path.isfile(old_path):
+            try:
+                os.remove(old_path)
+            except OSError:
+                pass  # 清理失败不应让上传整体失败
+
     avatar_url = f"/uploads/avatars/{filename}"
     current_user.avatar = avatar_url
     db.commit()
