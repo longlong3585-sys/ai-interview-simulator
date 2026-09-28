@@ -449,12 +449,26 @@ class ForeignKeyCascadeTests(unittest.TestCase):
 
 
 class DoesNotTouchExistingTablesTests(unittest.TestCase):
-    """002 只新增对象，不得改动既有表的结构或数据。"""
+    """002 只新增对象，不得改动既有表的结构或数据。
+
+    为了**只**检验 002 的行为，这里用一个"只含 001 + 002"的版本目录，
+    而不是完整链。否则 T-18 的 003 会合法地改这些表，
+    本组用例就会把"003 的既定改动"误判成"002 越界" ——
+    首版就是这样：003 一落地，`test_legacy_tables_gain_no_columns` 立刻失败。
+    按迁移**分别**验证各自的影响范围，才不会互相干扰。
+    """
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="t17-existing-")
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.versions = os.path.join(self.tmp, "versions_001_002")
+        os.makedirs(self.versions)
+        for name in ("001_baseline.py", "002_sessions_and_stores.py"):
+            shutil.copy(os.path.join(VERSIONS_DIR, name),
+                        os.path.join(self.versions, name))
+
         self.db = os.path.join(self.tmp, "e.db")
-        run(self.db, backup=False, log=noop)
+        run(self.db, backup=False, versions_dir=self.versions, log=noop)
         self.conn = connect(self.db)
         self.uid = add_user(self.conn)
         self.conn.execute(
@@ -474,7 +488,6 @@ class DoesNotTouchExistingTablesTests(unittest.TestCase):
 
     def tearDown(self):
         self.conn.close()
-        shutil.rmtree(self.tmp, ignore_errors=True)
 
     def test_reexecuting_002_is_a_noop(self):
         """DDL 级幂等：把 002 的语句再执行一遍，不得报错、不得改动既有数据。"""
@@ -492,10 +505,16 @@ class DoesNotTouchExistingTablesTests(unittest.TestCase):
         self.assertEqual(after_counts, self.before_counts)
 
     def test_legacy_tables_gain_no_columns(self):
-        """002 不得给 users 加 `client_token` —— 那是 T-18 的工作。"""
+        """002 不得动既有表的列 —— 加列/删列是 003（T-18）的工作。
+
+        003 落地后，完整链的最终结构**当然**含 `must_change_password`
+        且不含 `link_url`；本用例检的是**002 单独的**影响范围，
+        因此必须只看 001+002 的结果。
+        """
         self.assertNotIn("client_token", column_names(self.conn, "users"))
         self.assertNotIn("must_change_password", column_names(self.conn, "users"))
-        # link_url 也还没删（T-18 才删）
+        self.assertNotIn("client_token", column_names(self.conn, "interview_records"))
+        # link_url 也还在（003 才删）
         self.assertIn("link_url", column_names(self.conn, "notifications"))
 
 

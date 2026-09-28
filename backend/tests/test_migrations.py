@@ -33,7 +33,7 @@ from migrations.runner import (  # noqa: E402
 VERSIONS_DIR = os.path.join(BACKEND_DIR, "migrations", "versions")
 
 # 与 001_baseline 声明一致 —— 即"迁移框架接管之前就已存在的三张表"。
-# 既有库（legacy）里只有这三张，因此对它们的列/行数比对是"零改动"的判据。
+# 既有库（legacy）里最初只有这三张，因此对它们的**数据行数**比对是"零丢失"的判据。
 LEGACY_EXPECTED = {
     "users": ["id", "username", "hashed_password", "created_at", "role", "email",
               "is_active", "nickname", "avatar", "bio", "gender", "birthday"],
@@ -42,6 +42,18 @@ LEGACY_EXPECTED = {
     "notifications": ["id", "user_id", "type", "message", "target_type",
                       "target_id", "is_read", "created_at", "link_url"],
 }
+
+# 002 + 003 之后，这三张**既有表**的最终结构。
+# 刻意从 LEGACY_EXPECTED 推导而不是手抄 —— 将来若有迁移再改它们，
+# 这里必须显式写出增量，改了什么一目了然。
+FINAL_LEGACY = {
+    "users": LEGACY_EXPECTED["users"] + ["must_change_password"],          # 003 加列
+    "interview_records": LEGACY_EXPECTED["interview_records"] + ["client_token"],  # 003 加列
+    "notifications": [c for c in LEGACY_EXPECTED["notifications"] if c != "link_url"],  # 003 删列
+}
+
+#: 迁移接管前就已存在的三张表（既有库的数据零丢失判据只针对它们）。
+LEGACY_TABLES = sorted(LEGACY_EXPECTED)
 
 # 002 新增的四张表。
 NEW_TABLES = {
@@ -57,8 +69,50 @@ NEW_TABLES = {
 
 # 空库跑完全部迁移后期望的完整结构。
 EXPECTED = {}
-EXPECTED.update(LEGACY_EXPECTED)
+EXPECTED.update(FINAL_LEGACY)
 EXPECTED.update(NEW_TABLES)
+
+
+def _schema_facts(path):
+    """提取一个库的"结构事实"，用于比较两条迁移路径是否收敛。
+
+    刻意**不比较 `sqlite_master.sql` 文本**。实测发现：SQLite 执行
+    `ALTER TABLE ADD COLUMN` 时会**就地拼接**新列，拼接点取决于原文本的排版
+    （最后一列与 `PRIMARY KEY` 是否同行，拼接结果就不同）。因此文本差异可能
+    纯属排版，不代表结构不同 —— 首版用文本比较，把无害的排版差异报成了漂移。
+    比较 `PRAGMA` 给出的结构事实才可靠。
+    """
+    conn = sqlite3.connect(path)
+    try:
+        facts = {}
+        tables = [r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' "
+            "AND name NOT LIKE 'sqlite_%' ORDER BY name")]
+        for name in tables:
+            columns = [
+                # (列名, 类型, NOT NULL, 默认值, 是否主键)
+                (d[1], (d[2] or "").upper(), d[3], d[4], d[5])
+                for d in conn.execute("PRAGMA table_info([%s])" % name)
+            ]
+            indexes = []
+            for r in conn.execute("PRAGMA index_list([%s])" % name):
+                # r = (seq, name, unique, origin, partial)
+                cols = tuple(i[2] for i in conn.execute("PRAGMA index_info([%s])" % r[1]))
+                # 自动索引的**名字**含序号，与创建顺序有关；用占位名避免假失败
+                idx_name = "«autoindex»" if r[1].startswith("sqlite_autoindex") else r[1]
+                indexes.append((idx_name, r[2], cols, r[4]))
+            foreign_keys = [
+                (f[2], f[3], f[4], f[5], f[6])
+                for f in conn.execute("PRAGMA foreign_key_list([%s])" % name)
+            ]
+            facts[name] = {
+                "columns": columns,
+                "indexes": sorted(indexes),
+                "foreign_keys": sorted(foreign_keys),
+            }
+        return facts
+    finally:
+        conn.close()
 
 
 def _all_revisions():
@@ -132,7 +186,16 @@ def _counts(path, tables):
 
 
 def _make_legacy_db(path):
-    """造一个"既有库"：结构与数据都模仿线上，但**没有 schema_migrations 表**。"""
+    """造一个"既有库"：结构与数据都模仿线上，但**没有 schema_migrations 表**。
+
+    这里的 DDL 与索引清单是**照真库抄的**（用 `PRAGMA` 导出后人工核对）：
+    真库的 `users` 用的是 SQLAlchemy 生成的多行排版，并且带有
+    `ix_users_id` / `ix_interview_records_id` / `ix_notifications_id` 三个索引
+    （旧版 `create_all()` 按 ORM 的 `index=True` 建的）。
+    T-18 新增的"两条路径必须收敛"断言**正是靠这个夹具发现**：
+    原先夹具漏建了 `ix_users_id`，而 001 在既有库上只被 stamp、不执行，
+    于是那个索引永远不会出现在既有库上 —— 夹具不忠实就会掩盖真实漂移。
+    """
     conn = sqlite3.connect(path)
     try:
         conn.executescript("""
@@ -141,17 +204,20 @@ def _make_legacy_db(path):
                 created_at DATETIME, role VARCHAR, email VARCHAR NOT NULL,
                 is_active BOOLEAN, nickname VARCHAR, avatar VARCHAR, bio TEXT,
                 gender VARCHAR, birthday DATE, PRIMARY KEY (id));
+            CREATE INDEX ix_users_id ON users (id);
             CREATE UNIQUE INDEX ix_users_username ON users (username);
             CREATE UNIQUE INDEX ix_users_email ON users (email);
             CREATE TABLE interview_records (
                 id INTEGER NOT NULL, user_id INTEGER, role VARCHAR, messages TEXT,
                 report TEXT, created_at DATETIME, status VARCHAR, admin_comment TEXT,
                 PRIMARY KEY (id), FOREIGN KEY(user_id) REFERENCES users (id));
+            CREATE INDEX ix_interview_records_id ON interview_records (id);
             CREATE TABLE notifications (
                 id INTEGER NOT NULL, user_id INTEGER, type VARCHAR, message TEXT,
                 target_type VARCHAR, target_id INTEGER, is_read BOOLEAN,
                 created_at DATETIME, link_url VARCHAR,
                 PRIMARY KEY (id), FOREIGN KEY(user_id) REFERENCES users (id));
+            CREATE INDEX ix_notifications_id ON notifications (id);
         """)
         conn.execute("INSERT INTO users (username, email, role, is_active) VALUES ('u1','a@b.c','user',1)")
         conn.execute("INSERT INTO users (username, email, role, is_active) VALUES ('admin','x@y.z','admin',1)")
@@ -182,16 +248,28 @@ class LoadMigrationsTests(unittest.TestCase):
            子串，但它是外键的**引用动作**，不是删除语句。
            首版实现用 `assertNotIn("DELETE ", blob)` 直接误报 —— 见下方
            `_leading_keywords` 的说明。
-        2. **不禁止 `ALTER`。** T-18 的既定工作就是删死列 `link_url`
-           （`ALTER TABLE ... DROP COLUMN`）。框架无法区分"被批准的
-           结构变更"与"误操作" —— 那是代码评审的职责，不是这条闸门的。
-           本闸门守的是"**框架/脚本不会自己删数据或删表**"。
+        2. **不禁止 `ALTER`。** T-18 的既定工作之一就是删死列
+           （`notifications.link_url`）。框架无法区分"被批准的结构变更"
+           与"误操作" —— 那是代码评审的职责，不是这条闸门的。
+        3. **`DROP` 是"声明的例外"。** 重建表（SQLite 不支持
+           `ADD COLUMN ... UNIQUE`）固有地需要 `DROP TABLE <旧表>`。
+           因此允许，但必须：迁移显式声明 `ALLOWS_TABLE_REBUILD`、
+           写出非空的 `REBUILD_REASON`、且只允许 `DROP TABLE <表名>` 这一种形态
+           —— 细节由 `test_only_declared_migrations_may_drop` 逐条检查。
 
         基线（001）另有一条更严的约束：必须是纯 CREATE（见下一个用例）。
         """
         for mig in load_migrations(VERSIONS_DIR):
             for stmt in mig.upgrade:
                 for kw in _leading_keywords(stmt):
+                    if kw == "DROP":
+                        # 只允许在已声明重建的迁移里出现（细节见另一个用例）
+                        self.assertTrue(
+                            mig.allows_table_rebuild,
+                            "迁移 %s 含 DROP 但未声明 ALLOWS_TABLE_REBUILD：%s"
+                            % (mig.revision, stmt.strip()[:80]),
+                        )
+                        continue
                     self.assertNotIn(
                         kw, DESTRUCTIVE_KEYWORDS,
                         "迁移 %s 含有破坏性语句（首关键字 %s）：%s"
@@ -209,20 +287,71 @@ class LoadMigrationsTests(unittest.TestCase):
             )
 
     def test_every_migration_is_idempotent_by_construction(self):
-        """安全闸 5 的静态部分：每一条 CREATE 都必须带 IF NOT EXISTS。
+        """安全闸 5 的静态部分：CREATE 语句在正常情况下必须带 IF NOT EXISTS。
 
-        （运行期的幂等由 EmptyDatabaseTests.test_is_idempotent 覆盖；
-         这里检查的是**脚本写法**，能更早发现问题。）
+        **唯一的例外**是重建表用的临时表 `x_new`：它**刻意**不加
+        IF NOT EXISTS —— 若 `x_new` 已存在，说明状态异常（上一次重建没清理干净），
+        此时应当**立刻报错**而不是继续在脏状态上操作。
+        这个例外只允许出现在显式声明了 `ALLOWS_TABLE_REBUILD` 的迁移里。
         """
         for mig in load_migrations(VERSIONS_DIR):
             for stmt in mig.upgrade:
                 head = stmt.strip().upper()
-                if head.startswith("CREATE"):
-                    self.assertIn(
-                        "IF NOT EXISTS", head,
-                        "迁移 %s 的语句缺少 IF NOT EXISTS，重复执行会失败：%s"
-                        % (mig.revision, head[:70]),
-                    )
+                if not head.startswith("CREATE"):
+                    continue
+                if "IF NOT EXISTS" in head:
+                    continue
+                self.assertTrue(
+                    mig.allows_table_rebuild,
+                    "迁移 %s 的语句缺少 IF NOT EXISTS，且未声明重建例外：%s"
+                    % (mig.revision, head[:70]),
+                )
+                self.assertRegex(
+                    head, r"^CREATE TABLE \w+_NEW\b",
+                    "迁移 %s 的非幂等 CREATE 只允许用于重建临时表（*_new）：%s"
+                    % (mig.revision, head[:70]),
+                )
+
+    def test_only_declared_migrations_may_drop(self):
+        """重建例外必须"声明 + 理由 + 只 DROP 临时目标"三件齐备。"""
+        for mig in load_migrations(VERSIONS_DIR):
+            drops = [s.strip() for s in mig.upgrade
+                     if _leading_keywords(s)[:1] == ["DROP"]]
+            if not drops:
+                continue
+            self.assertTrue(
+                mig.allows_table_rebuild,
+                "迁移 %s 含 DROP 语句但未声明 ALLOWS_TABLE_REBUILD：%s"
+                % (mig.revision, drops),
+            )
+            self.assertTrue(
+                mig.rebuild_reason.strip(),
+                "迁移 %s 声明了重建但没写 REBUILD_REASON" % mig.revision,
+            )
+            for stmt in drops:
+                # 只允许 DROP TABLE <名字>；不允许 DROP INDEX / VIEW / 带条件等
+                self.assertRegex(
+                    stmt.upper(), r"^DROP TABLE \w+$",
+                    "重建只允许 `DROP TABLE <表名>`：%s" % stmt,
+                )
+
+    def test_rebuild_reason_is_substantive(self):
+        for mig in load_migrations(VERSIONS_DIR):
+            if mig.allows_table_rebuild:
+                self.assertGreaterEqual(
+                    len(mig.rebuild_reason.strip()), 30,
+                    "迁移 %s 的重建理由过于简短，不足以让人日后判断是否仍需重建"
+                    % mig.revision,
+                )
+
+    def test_baseline_and_002_do_not_claim_rebuild(self):
+        """没有重建需求的迁移不得顺手声明该例外（避免例外被滥用）。"""
+        migs = {m.revision: m for m in load_migrations(VERSIONS_DIR)}
+        for rev in ("001", "002"):
+            self.assertFalse(
+                migs[rev].allows_table_rebuild,
+                "迁移 %s 不需要重建，不应声明 ALLOWS_TABLE_REBUILD" % rev,
+            )
 
     def test_revision_chain_is_linked(self):
         """down_revision 必须串成一条链，否则乱序执行会得到错误结构。"""
@@ -307,26 +436,29 @@ class LegacyDatabaseTests(unittest.TestCase):
         run(self.db, backup=False, dry_run=True, log=lambda *a, **k: None)
         self.assertEqual(_sha256(self.db), self.before_hash, "dry-run 改动了数据库")
 
-    def test_existing_tables_and_data_untouched(self):
-        """核心断言：既有三张表的结构一行不改、数据一行不丢。
+    def test_existing_data_is_never_lost(self):
+        """核心断言：既有三张表的**数据一行不丢**。
 
-        注意这里**不再**断言"库里的表集合不变" —— 既有库的正确处理是
-        "stamp 基线（不建表）+ 继续应用其后的迁移"。因此 002 新增的四张表
-        **应该**出现；而接管前就存在的三张表必须原样不动。二者要分开断言，
-        否则要么误放行"既有表被改"，要么误拦"新迁移不该执行"。
+        注意这里与 T-14 时期的语义差别（T-18 修正）：
+        当时只有 001，既有库的正确处理是"只 stamp、不建表"，所以断言是
+        "结构与数据都零改动"。现在有了 002/003，既有库会**被合法地改动**
+        （002 新增四张表，003 给 users/interview_records 加列、删 notifications 的死列）。
+        因此正确的判据是：
+
+          * **数据行数**必须完全不变（本用例）
+          * **最终结构**必须等于全部迁移声明的结果（下一个用例）
+          * 且两条路径（既有库 / 空库）必须**收敛到同一套结构**（再下一个用例）
+
+        把"结构不变"与"数据不丢"分开，才能既不误放行数据丢失，
+        也不误拦合法的结构演进。
         """
         run(self.db, backup=False, log=lambda *a, **k: None)
 
-        self.assertEqual(_sha256(self.db) != self.before_hash, True,
-                         "库文件应当发生变化（版本表 + 002 新建的四张表）")
-
-        # 既有三张表的结构完全不变（link_url 等原样保留）
-        for table, cols in self.before_cols.items():
-            self.assertEqual(_columns(self.db, table), cols,
-                             "既有库的表 %s 结构被改动了" % table)
+        self.assertNotEqual(_sha256(self.db), self.before_hash,
+                            "库文件应当发生变化（版本表 + 002/003 的结构变更）")
 
         # 既有数据一行不丢
-        self.assertEqual(_counts(self.db, LEGACY_EXPECTED), self.before_counts,
+        self.assertEqual(_counts(self.db, LEGACY_TABLES), self.before_counts,
                          "既有库的数据行数发生变化 —— 可能丢数据！")
 
         # 002 的四张新表应当被建出来
@@ -341,12 +473,69 @@ class LegacyDatabaseTests(unittest.TestCase):
         finally:
             conn.close()
 
+    def test_existing_tables_reach_final_structure(self):
+        """既有表最终必须等于迁移声明的结构（003 的加列/删列确实生效）。"""
+        run(self.db, backup=False, log=lambda *a, **k: None)
+        for table, cols in FINAL_LEGACY.items():
+            self.assertEqual(
+                _columns(self.db, table), cols,
+                "既有表 %s 的最终结构与声明不符" % table,
+            )
+
+    def test_legacy_and_empty_paths_converge(self):
+        """**两条路径必须收敛到同一套结构。**
+
+        这是最有价值的一条断言：001 的 docstring 早就警告过
+        "基线必须反映现实，否则对新库与既有库会得到两套不同结构"。
+        有了重建表这种操作，路径分歧的风险显著上升
+        （例如既有库走 stamp+增量、空库走完整脚本，二者若不等价就会埋雷）。
+
+        比较的是**结构事实**（列/索引/外键），不是建表语句文本 ——
+        理由见 `_schema_facts` 的说明。
+
+        这个断言在 T-18 首次运行时**真的抓到了东西**：合成夹具漏建
+        `ix_users_id`，而 001 在既有库上只 stamp 不执行，该索引便永远不会
+        出现 —— 说明夹具本身不忠实。已按真库实际结构修正夹具。
+        """
+        run(self.db, backup=False, log=lambda *a, **k: None)
+
+        other_tmp = tempfile.mkdtemp(prefix="t14-converge-")
+        self.addCleanup(shutil.rmtree, other_tmp, ignore_errors=True)
+        fresh = os.path.join(other_tmp, "fresh.db")
+        run(fresh, backup=False, log=lambda *a, **k: None)
+
+        legacy, from_scratch = _schema_facts(self.db), _schema_facts(fresh)
+
+        self.assertEqual(
+            sorted(legacy), sorted(from_scratch),
+            "既有库与空库建出的表集合不同：只在既有库=%s 只在空库=%s"
+            % (sorted(set(legacy) - set(from_scratch)),
+               sorted(set(from_scratch) - set(legacy))),
+        )
+        for table in sorted(from_scratch):
+            self.assertEqual(
+                legacy[table]["columns"], from_scratch[table]["columns"],
+                "表 %s 的列在两条路径下不同：\n  既有库=%s\n  空库  =%s"
+                % (table, legacy[table]["columns"], from_scratch[table]["columns"]),
+            )
+            self.assertEqual(
+                legacy[table]["indexes"], from_scratch[table]["indexes"],
+                "表 %s 的索引在两条路径下不同：\n  既有库=%s\n  空库  =%s"
+                % (table, legacy[table]["indexes"], from_scratch[table]["indexes"]),
+            )
+            self.assertEqual(
+                legacy[table]["foreign_keys"], from_scratch[table]["foreign_keys"],
+                "表 %s 的外键在两条路径下不同：\n  既有库=%s\n  空库  =%s"
+                % (table, legacy[table]["foreign_keys"],
+                   from_scratch[table]["foreign_keys"]),
+            )
+
     def test_running_twice_is_safe(self):
         run(self.db, backup=False, log=lambda *a, **k: None)
         after_first = _sha256(self.db)
         run(self.db, backup=False, log=lambda *a, **k: None)
         self.assertEqual(_sha256(self.db), after_first, "第二次运行改动了数据库")
-        self.assertEqual(_counts(self.db, LEGACY_EXPECTED), self.before_counts)
+        self.assertEqual(_counts(self.db, LEGACY_TABLES), self.before_counts)
 
 
 class SafetyTests(unittest.TestCase):

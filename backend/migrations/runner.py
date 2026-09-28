@@ -11,12 +11,30 @@
   autogenerate ✗（迁移手写 SQL，本项目量级可接受）
   downgrade ✗（本项目只前进；如需回滚，用 T-01 的备份恢复）
 
-数据安全设计（见 run() 的 5 道闸）：
+数据安全设计（见 run() 的多道闸）：
   1. 迁移前强制备份（可 --skip-backup，但真实库上默认开启）
   2. 只读预检：结构不符合预期则中止，不猜测
   3. 事务包裹：单个迁移失败整体回滚
   4. 只执行迁移脚本里显式写出的语句，框架自身绝不 DROP/DELETE
   5. 幂等：已记录的版本直接跳过
+
+T-18 新增的三道闸（为"重建表"这类结构变更准备，全部在事务内、失败即整体回滚）：
+  6. **行数不得减少**：迁移前后逐表比对行数，任何既有表少了行就中止。
+     重建表（DROP + RENAME）最容易出的错就是 `INSERT INTO new SELECT` 少拷了行，
+     而它在提交后**完全静默** —— 这道闸把它变成不可能提交。
+  7. **声明式自检**：迁移可声明 `VERIFY_STATEMENTS = [(SQL, 期望值), ...]`，
+     逐条执行比对。用于断言"列数正确 / 该死的列确实没了 / 没有残留 _new 表"。
+  8. **foreign_key_check 必须为空**：在 COMMIT 之前跑，不通过就中止。
+
+    这道闸尤其必要，因为**迁移期间外键强制是关闭的**（实测：runner 用的是裸
+    `sqlite3.connect()`，`PRAGMA foreign_keys` 默认 0；只有应用引擎的连接才被
+    T-15 的 connect 事件设为 ON）。而 `PRAGMA foreign_key_check` 是**诊断**，
+    与那个开关无关，因此在迁移里可以照常当安全闸用。
+
+三个可选的"例外声明"（不声明就走最严的默认值）：
+    ALLOWS_DATA_LOSS = True        确实需要删行的迁移（如清理任务）必须显式声明
+    ALLOWS_TABLE_REBUILD = True    允许脚本里出现 DROP TABLE（重建表的固有步骤）
+    REBUILD_REASON = "..."         声明重建时**必须**给出理由，否则加载期直接报错
 """
 
 import datetime
@@ -39,6 +57,14 @@ class Migration(NamedTuple):
     down_revision: Optional[str]
     upgrade: List[str]
     downgrade: List[str]
+    #: T-18：声明式自检 —— [(SQL, 期望标量), ...]，在 COMMIT 前逐条比对。
+    verify: List[Tuple[str, object]] = []
+    #: T-18：确实需要删行时才声明（默认 False = 任何表行数减少都中止）。
+    allows_data_loss: bool = False
+    #: T-18：允许脚本里出现 DROP TABLE（重建表的固有步骤）。
+    allows_table_rebuild: bool = False
+    #: T-18：声明重建时的理由（非空才允许加载）。
+    rebuild_reason: str = ""
 
 
 class MigrationError(Exception):
@@ -71,12 +97,34 @@ def load_migrations(versions_dir: str = VERSIONS_DIR) -> List[Migration]:
         if rev in found:
             raise MigrationError("revision 重复：%s（%s 与已有迁移冲突）" % (rev, fname))
 
+        # T-18：重建表是"声明式例外"，必须给出理由 —— 否则加载期就拒绝。
+        # 目的是让每一次 DROP TABLE 都在代码里留下"为什么"的痕迹。
+        allows_rebuild = bool(getattr(module, "ALLOWS_TABLE_REBUILD", False))
+        reason = (getattr(module, "REBUILD_REASON", "") or "").strip()
+        if allows_rebuild and not reason:
+            raise MigrationError(
+                "%s 声明了 ALLOWS_TABLE_REBUILD 但未给出 REBUILD_REASON —— "
+                "重建表必须写明理由" % fname
+            )
+
+        verify = []
+        for item in getattr(module, "VERIFY_STATEMENTS", []) or []:
+            if not (isinstance(item, (tuple, list)) and len(item) == 2):
+                raise MigrationError(
+                    "%s 的 VERIFY_STATEMENTS 每项必须是 (SQL, 期望值)：%r" % (fname, item)
+                )
+            verify.append((item[0], item[1]))
+
         found[rev] = Migration(
             revision=rev,
             description=module.DESCRIPTION,
             down_revision=getattr(module, "DOWN_REVISION", None),
             upgrade=list(module.UPGRADE_STATEMENTS),
             downgrade=list(getattr(module, "DOWNGRADE_STATEMENTS", [])),
+            verify=verify,
+            allows_data_loss=bool(getattr(module, "ALLOWS_DATA_LOSS", False)),
+            allows_table_rebuild=allows_rebuild,
+            rebuild_reason=reason,
         )
     return [found[r] for r in sorted(found)]
 
@@ -179,6 +227,82 @@ def _record(conn, migration: Migration):
     )
 
 
+# --------------------------------------------------------------------------
+# T-18 安全闸（全部在事务内执行，任何一项不通过 -> 抛错 -> 整体回滚）
+# --------------------------------------------------------------------------
+
+def _row_counts(conn) -> Dict[str, int]:
+    """当前各业务表的行数（排除 sqlite_* 内部表）。"""
+    return {
+        t: conn.execute("SELECT count(*) FROM [%s]" % t).fetchone()[0]
+        for t in sorted(_table_names(conn))
+    }
+
+
+def _check_no_row_loss(before: Dict[str, int], after: Dict[str, int],
+                       migration: Migration) -> int:
+    """安全闸 6：任何既有表的行数**不得减少**。
+
+    重建表的典型事故是 `INSERT INTO new SELECT ...` 少拷了行（列顺序错、
+    WHERE 写漏、类型不匹配被静默跳过），随后旧表被 DROP —— 数据就**永久**
+    没了，而且迁移会"成功"返回。这道闸把这种事故变成"不可能提交"。
+    """
+    if migration.allows_data_loss:
+        return len(before)
+
+    lost = {}
+    for table, n in before.items():
+        m = after.get(table, 0)
+        if m < n:
+            lost[table] = (n, m)
+    if lost:
+        detail = "; ".join("%s: %d -> %d" % (t, a, b) for t, (a, b) in sorted(lost.items()))
+        raise MigrationError(
+            "迁移 %s 让既有表行数减少，已中止并回滚 —— %s。"
+            "若确实需要删行，请在迁移里显式声明 ALLOWS_DATA_LOSS = True"
+            % (migration.revision, detail)
+        )
+    return len(before)
+
+
+def _run_verifications(conn, migration: Migration) -> int:
+    """安全闸 7：逐条执行迁移声明的自检 SQL。"""
+    for sql, expected in migration.verify:
+        try:
+            row = conn.execute(sql).fetchone()
+        except sqlite3.Error as exc:
+            raise MigrationError(
+                "迁移 %s 的自检 SQL 执行失败：%s\n  SQL: %s"
+                % (migration.revision, exc, " ".join(sql.split()))
+            )
+        actual = row[0] if row else None
+        if actual != expected:
+            raise MigrationError(
+                "迁移 %s 自检未通过：期望 %r，实得 %r\n  SQL: %s"
+                % (migration.revision, expected, actual, " ".join(sql.split()))
+            )
+    return len(migration.verify)
+
+
+def _check_foreign_keys(conn, migration: Migration) -> int:
+    """安全闸 8：`PRAGMA foreign_key_check` 必须无违规。
+
+    为什么必须有：**迁移期间外键强制是关闭的**（runner 用裸 sqlite3.connect()，
+    `PRAGMA foreign_keys` 默认 0）。也就是说迁移写进去的违约数据不会被当场拒绝。
+    `foreign_key_check` 是诊断语句，与那个开关无关，因此可以在这里补上检查。
+    """
+    violations = conn.execute("PRAGMA foreign_key_check").fetchall()
+    if violations:
+        sample = "; ".join(
+            "%s(rowid=%s) -> %s" % (v[0], v[1], v[2]) for v in violations[:5]
+        )
+        raise MigrationError(
+            "迁移 %s 产生了 %d 条外键违规，已中止并回滚：%s"
+            % (migration.revision, len(violations), sample)
+        )
+    return 0
+
+
 def run(db_path: str, *, backup: bool = True, dry_run: bool = False,
         versions_dir: str = VERSIONS_DIR, log=print) -> int:
     """把数据库升级到最新版本。返回已应用的迁移数量。"""
@@ -232,10 +356,18 @@ def run(db_path: str, *, backup: bool = True, dry_run: bool = False,
                 if migration.revision in applied_revisions(conn):
                     continue
                 log("  应用 %s : %s" % (migration.revision, migration.description))
+                # T-18：迁移前快照行数（用于安全闸 6）
+                before_counts = _row_counts(conn)
                 for stmt in migration.upgrade:
                     conn.execute(stmt)
+                # 三道闸都在 COMMIT 之前，任一不通过即抛错 -> 整体回滚
+                checked = _check_no_row_loss(before_counts, _row_counts(conn), migration)
+                n_verify = _run_verifications(conn, migration)
+                _check_foreign_keys(conn, migration)
                 _record(conn, migration)
                 count += 1
+                log("     自检: 声明式 %d 项通过 | 行数无减少（%d 张表）| "
+                    "foreign_key_check 无违规" % (n_verify, checked))
 
             conn.execute("COMMIT")
         except Exception:
