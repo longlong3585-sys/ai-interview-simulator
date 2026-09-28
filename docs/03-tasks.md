@@ -34,6 +34,7 @@
 | T-10 | ✅ 已完成 | 2026-09-29 | `da46147` | 新增 `utils/safe_json.py`；修复历史列表/详情 500，并统一 stats、管理端列表、start_interview 非法 JSON→400；前端历史列表加 `report ?` 守卫防白屏。**13 项测试**；**破坏性验证：13 项全部报错** |
 | T-11 | ✅ 已完成 | 2026-09-29 | `064558d` | 后端移除 `ChatRequest.action` 与 `ReportRequest.user_id`；前端移除对应发送。**后端 7 项 + 前端契约 3 项**（含识别规则自检）；**破坏性验证：加回字段后 2/7 失败**；保留向后兼容（extra 字段被忽略） |
 | T-12 | ✅ 已完成 | 2026-09-29 | `1e44bfe` | 新增 `utils/log_setup.py`；异常处理器记录完整堆栈+请求上下文+`error_id`，对外仍只给通用消息。**7 项测试**；**破坏性验证：4/7 失败**。真机证据：客户端无任何泄露、服务端有完整堆栈且 error_id 对应 |
+| T-14 | ✅ 已完成 | 2026-09-29 | 见 git log | **偏离 ADR-009**：PyPI+4 镜像全不可达，Alembic 装不上 → 用户批准自建 runner（ADR-009R）。`migrations/runner.py` + `versions/001_baseline.py` + `scripts/migrate.py`；**零新增依赖**。移除 `database.py` 的 `create_all()`+手写 ALTER。**15 项测试**；破坏性验证抓到 2 个真实弱点（回滚断言过弱、dry-run 写库）并已修正 |
 | T-13 | ✅ 已完成 | 2026-09-29 | `46987b1` | 后端提取 `SKIP_WORDS` 常量 + 新增 `GET /api/interview/config`；前端删除硬编码列表改为拉取。**后端 9 项 + 前端 6 项**；**破坏性验证：20 个 subTest 失败**。检测规则含正/负样本自检 |
 
 > **⚠️ 操作教训（T-05 真机验证时踩到，务必记住）**
@@ -159,7 +160,7 @@
 
 | ID | 类别 | 任务 | 工时 | 依赖 | 标记 |
 |---|---|---|---|---|---|
-| T-14 | **存储重构** | 引入 Alembic；建立基线（`stamp <基线修订>` → `upgrade head`）+ runbook | 4h | T-02 | 🔒 |
+| T-14 | **存储重构** | 引入 Alembic → **改为自建轻量 runner**（见 ADR-009R）；建立基线 + runbook | 4h | T-02 | ✅ |
 | T-15 | **存储重构** | engine 配置：WAL + `busy_timeout=15000` + `foreign_keys=ON` + `isolation_level=None` + `BEGIN IMMEDIATE` 事件 | 3h | T-14 | 🔒 |
 | T-16 | **存储重构** | `services/stores/` 抽象层协议（`SessionStore`/`CaptchaStore`/`RateLimitStore`） | 2h | T-15 | 🔒 |
 | T-17 | **存储重构** | 迁移：新增 4 张表（`interview_sessions`/`captcha_store`/`auth_attempts`/`token_blacklist`） | 3h | T-16 | 🔒 |

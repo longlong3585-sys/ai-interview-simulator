@@ -39,6 +39,18 @@ TEST_DB_PATH = os.path.join(_TEST_TMP_DIR, "test_interview.db")
 if not os.environ.get("INTERVIEW_TEST_KEEP_DB_URL"):
     os.environ["DATABASE_URL"] = "sqlite:///" + TEST_DB_PATH.replace("\\", "/")
 
+# ---- 2b. T-14：测试库的表结构改由迁移脚本建立 ----
+# 原先依赖 `database.py` 在 import 期调用 `create_all()`；该行为已被移除
+# （import 有副作用是当初结构失控的根源之一）。因此这里显式跑一次迁移。
+# 必须放在 import database **之前**，否则引擎会指向一个还没有表的库。
+def _bootstrap_test_schema():
+    from migrations.runner import run as run_migrations
+
+    run_migrations(TEST_DB_PATH, backup=False, log=lambda *_a, **_k: None)
+
+
+_bootstrap_test_schema()
+
 # ---- 3. 会话结束自动清理 ----
 @atexit.register
 def _cleanup_test_tmp():

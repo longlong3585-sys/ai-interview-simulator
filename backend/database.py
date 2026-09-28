@@ -61,22 +61,17 @@ class Notification(Base):
 
 User.notifications = relationship("Notification", back_populates="user")
 
-# 创建所有表
-Base.metadata.create_all(bind=engine)
-
-# SQLite 迁移：为已有 notifications 表添加新字段
-if DATABASE_URL.startswith("sqlite"):
-    import sqlite3
-    conn = sqlite3.connect(DATABASE_URL.replace("sqlite:///", ""))
-    cursor = conn.cursor()
-    existing_cols = [row[1] for row in cursor.execute("PRAGMA table_info(notifications)").fetchall()]
-    if "type" not in existing_cols:
-        cursor.execute("ALTER TABLE notifications ADD COLUMN type VARCHAR DEFAULT 'system'")
-    if "link_url" not in existing_cols:
-        cursor.execute("ALTER TABLE notifications ADD COLUMN link_url VARCHAR")
-    if "target_type" not in existing_cols:
-        cursor.execute("ALTER TABLE notifications ADD COLUMN target_type VARCHAR")
-    if "target_id" not in existing_cols:
-        cursor.execute("ALTER TABLE notifications ADD COLUMN target_id INTEGER")
-    conn.commit()
-    conn.close()
+# ---------------------------------------------------------------------------
+# T-14：建表与结构变更已全部交由 backend/migrations/ 管理。
+#
+# 原先这里在 **import 期**执行 `Base.metadata.create_all()` 外加一段手写
+# `ALTER TABLE notifications ADD COLUMN ...`。问题：
+#   1. 没有版本记录 —— 无法知道某个库处于哪一版结构；
+#   2. import 有副作用 —— 任何 `import database` 都可能改动线上库；
+#   3. 手写 ALTER 无法表达"删除列/改类型"等变更，只能一路加列
+#      （`notifications.link_url` 这个死列就是这么来的）。
+#
+# 现在：结构由迁移脚本管理，入口是 `python backend/scripts/migrate.py`。
+# 应用启动**不再自动建表** —— 这是有意的：启动即改结构是危险的默认行为。
+# 部署流程应显式执行迁移（见 docs/03-tasks.md 的 runbook）。
+# ---------------------------------------------------------------------------

@@ -303,6 +303,33 @@ active ──报告生成成功──────────▶ finished     �
 
 ---
 
+### 3.6 ADR-009R · 迁移机制：自建轻量 runner（修订 ADR-009）
+
+**背景（T-14 实测）**：ADR-009 原计划「引入 Alembic」。但本机 **PyPI 与清华/阿里/中科大/腾讯 4 个镜像全部 TLS 被重置**，`alembic` / `Mako` / `MarkupSafe` **均无法安装**（venv 无、requirements 无、pip 缓存无）。网络是白名单式的——只有 `api.deepseek.com` 可达。
+
+**用户裁决（2026-09-29）**：**采用选项 B —— 自建轻量迁移机制**，并要求先出方案再动代码。方案已确认。
+
+| 项 | ADR-009 原设计 | **ADR-009R 实际实现** |
+|---|---|---|
+| 工具 | Alembic | **自建** `backend/migrations/` + `scripts/migrate.py` |
+| 新增依赖 | alembic + Mako + MarkupSafe | **零** |
+| 版本化 | `alembic_version` 表 | `schema_migrations` 表（revision / description / applied_at） |
+| 顺序执行 | revision 链 | 按 revision 升序，校验重复与首版必须是基线 |
+| 既有库接管 | `stamp <基线修订>` | **`legacy` 分支：只写版本记录，不执行任何 DDL** |
+| 事务 | 迁移级事务 | `BEGIN IMMEDIATE` 包裹，失败整体 `ROLLBACK` |
+| 备份 | 需自行配置 | **框架内置强制备份**（失败即中止，安全闸 1） |
+| 只读预检 | — | `detect_state()` 五态判定 + `partial` 拒绝自动处理 |
+| autogenerate | ✅ | ❌ 手写 SQL（本项目迁移仅 3~4 个，优势体现不出来） |
+| downgrade | ✅ | ❌ 只前进；回滚用 T-01 备份恢复 |
+
+**SQLite 特有约束**：`executescript()` 会隐式 COMMIT，破坏事务性，因此迁移脚本以**语句列表**（`UPGRADE_STATEMENTS`）声明，逐条 `execute()`，确保可整体回滚。
+
+**连带改动（本轮风险最高处）**：`database.py` 中 import 期的 `create_all()` + 手写 `ALTER TABLE` 已**移除**——import 有副作用正是结构失控的根源（`notifications.link_url` 死列即由此产生）。`tests/__init__.py` 改为在建测试库时显式调用迁移 runner。**已实测：该项移除未影响既有 120 项测试**（全量 135 项通过）。
+
+**T-14 事故记录（已修复并还原）**：runner 初版中 `applied_revisions()` 会调用建表函数，导致 `--dry-run`（使用读写连接）在**真库**上创建了一张空的 `schema_migrations` 表。已修为纯只读，并删除真库上的残留空表（删除前已备份，业务数据未受影响）。该 bug 现由 `test_dry_run_changes_nothing` 守住——破坏性验证确认：恢复 buggy 版本后该用例立即失败。
+
+---
+
 ## 4. 数据模型 DDL 变更
 
 **仅 1 处新增列**（其余表结构沿用 v2.1；**因涉及数据库，须随 ADR-004R 一并审批**）：
