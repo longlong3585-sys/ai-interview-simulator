@@ -26,6 +26,8 @@
 > **T-19 代码与测试已完成；实现中发现 T-16 协议两处硬伤并修正，另需迁移 004 补 `report` 列 —— 真库仍在 `003`，004 待用户执行**。**T-20 起仍为 🔒 冻结**。
 > **📌 解冻补充（2026-09-29，第五轮）**：用户**批准** T-19 的三项裁决（`ReplayLookup` 修正 / **选项 A** 执行迁移 004 / 存储层 JSON 不静默回退），并确认已亲手执行迁移 004（`verify_t19.py --db` 迁移前 3 项 FAIL → 迁移后 6/6 PASS）。**解冻 T-20**。
 > **T-20 已完成**（无需迁移）。**T-21 起仍为 🔒 冻结**。
+> **📌 解冻补充（2026-09-29，第六轮）**：用户验收 T-20 通过（并在前端实测确认了"输错自动刷新 + 成功后消耗验证码 + 跳登录页报过期"的完整链路），**解冻 T-21**，并特别要求：① 保持表驱动设计、让 `factory.py` 装配无感；② 限流必须用反代配置的 `X-Forwarded-For` 取真实 IP，**防止所有人共用后端服务器 IP 导致一人连错锁死全网**。
+> **T-21 已完成**（无需迁移）。**T-22 起仍为 🔒 冻结**。
 > **阶段顺序不调整**：T-44 路由化按原计划执行（用户认定它是根治 Bug 2/Bug 3 的前置）。
 > **开工规则（规则 7）**：每次只做一个任务 → 读任务 → 写代码 → 写测试 → 运行测试 → 修复 → 状态改 done → `git commit` → **暂停等"继续下一个任务"**。
 
@@ -52,7 +54,8 @@
 | T-17 | ✅ 已完成 | 2026-09-29 | 见 git log | `migrations/versions/002_sessions_and_stores.py`：4 张新表 + 5 个索引，**全部 `CREATE ... IF NOT EXISTS`**。`ended_reason` 直接写进 CREATE（架构 §4 的 ALTER 形式是"假设表已存在"，实际本表首次创建，结果结构一致）。**真库已实跑迁移成功**（`001` → `001, 002`，原始日志见 `docs/17-migration-log.md`）：既有数据零丢失（users=3 / records=5 不变）、`integrity_check=ok`、`foreign_key_check` 无违规。**25 项专项测试**（另有 `test_migrations.py` 由 15 → 18 项、`test_backup_tools.py` 由 9 → 14 项）。**破坏性验证：11 个探针全部被抓住**（其中 1 个首轮漏网：DDL 的 `DEFAULT 'active'` 从未被执行到 → 已补断言）。⚠️ 顺带发现并修复 3 个问题：迁移日志乱码、`journal_mode.py` 附属文件统计时序错误、**备份产物不是单文件**（见日志 §10） |
 | T-18 | ✅ 已完成 | 2026-09-29 | `b17c833` | `migrations/versions/003_existing_tables.py`：`users` 原生 `ADD COLUMN`、`interview_records` **重建表**加 `client_token` + `UNIQUE`、`notifications` **重建表**删死列 `link_url`。**真库已由用户人工执行成功**（`003`，14 项自检通过，`verify_t18.py` 26/26）。**为"重建表"新增三道框架闸**（`runner.py`）：行数不得减少 / 声明式自检 / `foreign_key_check` 必须为空，全部在 COMMIT 前执行、失败即整体回滚。**破坏性验证：13 个探针全部被抓住**（其中 1 个首轮"漏网"实为探针自身针位错误 → 已加"针必须唯一命中"校验）。**交付物**：`scripts/verify_t18.py`、`scripts/probes/probe_t18_migration.py`、`docs/18-manual-migration.md` |
 | T-19 | ✅ 已完成 | 2026-09-29 | `f1bdfaa` | `services/stores/sqlite_store.py`：`SessionStore` 的 9 个方法实现（乐观锁 / `seq` 幂等 / 状态机 / 短事务）+ `services/stores/factory.py`（**唯一装配点**，带启动期协议自检）。⚠️ 实现时发现 T-16 协议两处硬伤并修正：`find_replay` 返回 `Optional[str]` 的歧义（空回复重发会被当成新请求 → **重复计费**）改为 `ReplayLookup`；`finish()` 要写报告但 `interview_sessions` 无 `report` 列（ADR-004 与 §6.2 DDL 矛盾）→ 按 ADR-004 补**迁移 004**（用户已批准并手工执行，`verify_t19.py --db` 迁移后 6/6 PASS）。⚠️ 有意偏离 T-10 约定：会话行 JSON 损坏**严格报错**而非容错回退。**40 项专项 + 004 的 12 项**；**15 个探针全部被抓住**。⚠️ **一次真实事故**：首次跑探针时用 `job_kill` 强杀，S7 的缺陷被永久留在工作区（`try/finally` 挡不住强杀），导致测试挂死；已加"运行前另存副本 + 状态文件不符则拒绝运行"的保护。**交付物**：`scripts/verify_t19.py`、`scripts/probes/probe_t19_store.py`、`docs/19-manual-verification.md` |
-| T-20 | ✅ 已完成 | 2026-09-29 | 见 git log | `services/stores/sqlite_captcha_store.py`：`CaptchaStore` 的 3 个方法；装配点扩为 `_REGISTRY` 表驱动（T-21 加一行即可）。**核心改进**：原实现是内存字典（多 worker 下各存一份 → 登录随机失败），且"读→判断→写"有 TOCTOU 缝隙；本实现用**单条 UPDATE** 同时完成"存在 + 未用 + 未过期 + 码匹配 + 消费"，`rowcount==1` 才算成功 → **原子**。**31 项测试**（TTL 边界 / 一次性 / 输错不消费 / 输入去空白 / 成功置 `used=1` 而非删除 / 并发恰好一个成功 / 装配点自检 / 事务纪律）。**破坏性验证：10 个探针全部被抓住**（其中 1 个首轮"漏网"→ 发现那个提前返回是**安全判定**而非优化，已补 fail-open 用例）。**无需迁移**（`captcha_store` 表 T-17 已建） |
+| T-20 | ✅ 已完成 | 2026-09-29 | `0bd9779` | `services/stores/sqlite_captcha_store.py`：`CaptchaStore` 的 3 个方法；装配点扩为 `_REGISTRY` 表驱动。**核心改进**：原实现是内存字典（多 worker 下各存一份 → 登录随机失败），且"读→判断→写"有 TOCTOU 缝隙；本实现用**单条 UPDATE** 同时完成"存在 + 未用 + 未过期 + 码匹配 + 消费"，`rowcount==1` 才算成功 → **原子**。**32 项测试**；**10 个探针全部被抓住**（其中 1 个首轮"漏网"→ 发现那个提前返回是**安全判定**而非优化，已补 fail-open 用例）。**无需迁移** |
+| T-21 | ✅ 已完成 | 2026-09-29 | 见 git log | `services/stores/sqlite_rate_limit_store.py`（仅失败计数 / 滑动窗口）+ **`utils/client_ip.py`（X-Forwarded-For 信任链解析）**。⚠️ **修掉一个必现的线上缺陷**：原实现用 `request.client.host`，在 Nginx 后面那是**代理 IP** → 所有用户共用同一个限流键 → **一人连错 5 次锁死全网**。IP 解析取 **XFF 最右**（Nginx 亲自追加的那段），最左是客户端可伪造的；链长不足/非法 IP 一律退回直连对端（fail-closed）。**49 项测试**（IP 21 + 限流 28）；**破坏性验证：12 个探针全部被抓住**。装配点新增一行 `_REGISTRY`，`_assemble` 逻辑零改动。**无需迁移** |
 
 > **⚠️ 操作教训（T-05 真机验证时踩到，务必记住）**
 > `job_kill` **只杀 pwsh 包装进程，不会杀 uvicorn 的 python 子进程**。残留进程会继续占着 8000 端口，导致：
@@ -106,7 +109,7 @@
 
 ---
 
-## 阶段 2 已完成情况（T-14 ~ T-20）
+## 阶段 2 已完成情况（T-14 ~ T-21）
 
 | 任务 | 提交 | 内容 |
 |---|---|---|
@@ -115,10 +118,14 @@
 | T-16 存储抽象层协议 | `5893f78` | `services/stores/base.py`：3 个 `runtime_checkable` Protocol + 4 个 frozen dataclass + 类型化异常 + ISO 时间契约 |
 | T-17 迁移 002：四张新表 | `74e965c` | `versions/002_sessions_and_stores.py`；真库已实跑（`001` → `001, 002`） |
 | T-18 迁移 003：既有表变更 | `b17c833` | `versions/003_existing_tables.py`；首次改动既有表（加列 / 重建表 / 删列）；框架新增三道安全闸。真库已由用户人工执行 |
-| T-19 会话存储实现 | `f1bdfaa` | `services/stores/sqlite_store.py` + `factory.py` + 迁移 `004`（补 `report` 列）；修正 T-16 协议两处硬伤。真库 004 已由用户手工执行 |
-| T-20 验证码存储实现 | 见 git log | `services/stores/sqlite_captcha_store.py`；单条 UPDATE 实现原子消费；装配点改为表驱动。**无需迁移** |
+| T-19 会话存储实现 | `f1bdfaa` | `services/stores/sqlite_store.py` + `factory.py` + 迁移 `004`；修正 T-16 协议两处硬伤 |
+| T-20 验证码存储实现 | `0bd9779` | `services/stores/sqlite_captcha_store.py`；单条 UPDATE 实现原子消费 |
+| T-21 限流存储 + 客户端 IP 解析 | 见 git log | `services/stores/sqlite_rate_limit_store.py` + `utils/client_ip.py`；修掉"Nginx 后所有用户共用代理 IP 作限流键"的必现缺陷 |
 
-**测试规模**：后端 **337 项**（阶段 1 结束时 114，阶段 2 已 +223）＋ 前端 **13 项**，全部通过。
+**存储层三件套已齐**：`SessionStore` / `CaptchaStore` / `RateLimitStore`，装配点 `factory.py` 为表驱动（加一个存储只需加一行 `_REGISTRY`）。
+**剩余**：T-22 清理任务；**接线**（把三个仓储 + `resolve_client_ip` 接进路由）属 T-23+。
+
+**测试规模**：后端 **386 项**（阶段 1 结束时 114，阶段 2 已 +272）＋ 前端 **13 项**，全部通过。
 **本批偏差/事故均已记录**：T-14 的 `--dry-run` 曾在真库创建空表（已清理并加固为纯只读）；T-15 修正了 ADR-002 关于 `isolation_level` 的不准确说法，并在第二轮探针中补齐 `busy_timeout` 的判别力缺口（见 ADR-002R）。
 
 **T-15 交付物**
@@ -140,7 +147,7 @@
    │
    ├──▶ 阶段1 后端安全止血 (T-04~13)  ← 不碰数据库，可立即开工
    │
-   └──▶ 阶段2 存储层重构 (T-14~22)   ← T-14~T-20 已完成（真库：001~004）；T-21 起仍冻结
+   └──▶ 阶段2 存储层重构 (T-14~22)   ← T-14~T-21 已完成（真库：001~004）；T-22 起仍冻结
              │
              └──▶ 阶段3 Bug修复 🔒 (T-23~33)   ← 依赖新存储
                        │
@@ -211,7 +218,7 @@
 | T-18 | **存储重构** | 迁移：既有表变更（`client_token` / `must_change_password` / 删死列 `link_url`） | 3h | T-17 | ✅ |
 | T-19 | **存储重构** | `SQLiteSessionStore`：乐观锁 `version` + `seq` 幂等 + 状态机 + 短事务 | 4h | T-18 | ✅ |
 | T-20 | **存储重构** | `SQLiteCaptchaStore`（TTL 300s，一次性） | 2h | T-18 | ✅ |
-| T-21 | **存储重构** | `SQLiteRateLimitStore`（**仅失败计数** + 滑动窗口 10min/5 次） | 2h | T-18 | 🔒 |
+| T-21 | **存储重构** | `SQLiteRateLimitStore`（**仅失败计数** + 滑动窗口 10min/5 次） | 2h | T-18 | ✅ |
 | T-22 | **存储重构** | 清理任务 `scripts/cleanup.py` + `cleanup.timer`（单实例，非 APScheduler） | 3h | T-19,T-20,T-21 | 🔒 |
 
 **验收标准**
@@ -244,6 +251,10 @@
   ⚠️ **一处理论行为差异**（已在模块 docstring 与用例中写明）：过期判定由原来的严格 `<` 改为 `<=`（口径与 T-19 会话存储统一），差异宽度为一个瞬间。
   📌 **无需迁移**：`captcha_store` 表 T-17 已建，本任务不动数据库。
 - T-21：成功登录**不写**该表；第 5 次失败触发拒绝；10 分钟窗口过期后恢复
+  **实际验收**：`scripts/verify_t21.py` 走查 19/19，打印"第 N 次尝试 / 攻击者是否被拒 / 无辜用户是否被拒"对照表（前 5 次允许、第 6 次拒绝、无辜用户全程不受影响）；28 项专项测试 + **21 项 IP 解析测试**；**破坏性验证 12 个探针全部被抓住**。
+  🔴 **同时修掉一个必现的线上缺陷**：`routers/auth_router.py` 原先用 `request.client.host` 作为限流键。Nginx 之后那是**代理地址**（通常 127.0.0.1）→ 所有用户共用同一个桶 → **一人连错 5 次锁死全网**。已提供 `utils/client_ip.resolve_client_ip()`，取 **X-Forwarded-For 最右段**（Nginx 用 `$proxy_add_x_forwarded_for` 追加的那一段），最左段是客户端可伪造的、**绝不能取**（取了就等于每次换个桶 → 限流形同虚设）。信任层数由 `TRUSTED_PROXY_COUNT` 控制（本项目线上 = 1），无代理部署设 0；链长不足或受信任段非法时退回直连对端并打 WARNING（**fail-closed**，宁可误伤不可漏放）。
+  ⚠️ **接线尚未完成**：把 `resolve_client_ip()` 与限流仓储接进 `/api/login`（替换 `auth.py` 的内存字典）属于 T-23+ 的收口工作；本任务只交付存储与 IP 解析，因此走查脚本**复刻了登录端点里那道闸**（`count >= 5` 即拒绝）来做验收。**接线前，线上仍是原有的内存字典行为。**
+  📌 **无需迁移**：`auth_attempts` 表 T-17 已建。
 - T-22：定时任务**只运行一个实例**；过期会话被置 `abandoned`；过期验证码/限流记录被清除
 
 ---

@@ -13,18 +13,25 @@
 
 import os
 
-from services.stores.base import CaptchaStore, SessionStore
+from services.stores.base import CaptchaStore, RateLimitStore, SessionStore
 from services.stores.sqlite_captcha_store import SQLiteCaptchaStore
+from services.stores.sqlite_rate_limit_store import SQLiteRateLimitStore
 from services.stores.sqlite_store import SQLiteSessionStore
 
 #: 装配表：kind -> (环境变量, 协议, 中文名, sqlite 实现类)
-#: T-21 的限流存储往这里加一行即可，装配逻辑不用改。
+#:
+#: **加一个存储只需要在这里加一行** —— `_assemble` 的装配与协议自检逻辑
+#: 完全不用改（T-20 与 T-21 都验证了这一点）。
 _REGISTRY = {
     "session": (
         "SESSION_STORE_BACKEND", SessionStore, "会话存储", SQLiteSessionStore,
     ),
     "captcha": (
         "CAPTCHA_STORE_BACKEND", CaptchaStore, "验证码存储", SQLiteCaptchaStore,
+    ),
+    "rate_limit": (
+        "RATE_LIMIT_STORE_BACKEND", RateLimitStore, "限流存储",
+        SQLiteRateLimitStore,
     ),
 }
 
@@ -71,6 +78,17 @@ def get_captcha_store():
     return _instances["captcha"]
 
 
+def get_rate_limit_store():
+    """返回限流存储（进程内单例）。实现由 `RATE_LIMIT_STORE_BACKEND` 选择。
+
+    ⚠️ 限流键必须来自 `utils.client_ip.resolve_client_ip(request)`，
+    **不要**用 `request.client.host` —— 那在 Nginx 后面是全站共用的代理 IP。
+    """
+    if "rate_limit" not in _instances:
+        _assemble("rate_limit")
+    return _instances["rate_limit"]
+
+
 def reset_stores():
     """仅供测试：清掉全部单例，让下次调用重新装配。"""
     _instances.clear()
@@ -86,11 +104,17 @@ def reset_captcha_store():
     _instances.pop("captcha", None)
 
 
-# 预留：T-21 会在这里注册限流存储
+def reset_rate_limit_store():
+    """仅供测试：只清限流存储单例。"""
+    _instances.pop("rate_limit", None)
+
+
 __all__ = [
     "get_session_store",
     "get_captcha_store",
+    "get_rate_limit_store",
     "reset_stores",
     "reset_session_store",
     "reset_captcha_store",
+    "reset_rate_limit_store",
 ]
