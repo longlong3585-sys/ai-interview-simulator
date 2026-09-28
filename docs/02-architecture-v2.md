@@ -263,19 +263,27 @@ active ──报告生成成功──────────▶ finished     �
 
 | 项 | ADR-021 原设计 | **ADR-021R 修订** |
 |---|---|---|
-| 单元测试框架 | pytest + FastAPI TestClient | **主框架仍为 pytest（未来）**；当前以 **stdlib `unittest`** 运行 |
-| 前端测试 | Vitest + RTL | **不变**（Node 侧依赖已装齐，不受 PyPI 影响） |
-| 运行命令 | `pytest` | **`cd backend && python -m unittest discover -s tests -t . -v`** |
+| 单元测试框架（后端） | pytest + FastAPI TestClient | **主框架仍为 pytest（未来）**；当前以 **stdlib `unittest`** 运行 |
+| 组件测试（前端） | Vitest + React Testing Library | **不变（待激活）**；当前以 **零依赖契约测试（`node:test`）** 运行 |
+| 运行命令（后端） | `pytest` | **`cd backend && python -m unittest discover -s tests -t . -v`** |
+| 运行命令（前端） | `vitest` | **`cd frontend && npm run test:node`**（`npm run test` 保留给 Vitest） |
 | 测试库 | 独立文件 SQLite（非内存） | **不变**（已实现，见下） |
 
-**兼容性做法（关键）**：全部用例写成 `unittest.TestCase`，pytest **可原生收集**。同时保留：
-- `backend/pytest.ini`（前向兼容配置）
-- `backend/conftest.py`（pytest 加载时同样先完成环境隔离）
-- `backend/requirements-dev.txt`（记录 pytest 依赖，待网络恢复后安装）
+**⚠️ 更正一处预测错误**：本 ADR 初稿（T-02 时）曾写"前端 Vitest 不受 PyPI 影响，Node 侧依赖已装齐，应当能正常安装运行"。**该判断在 T-03 被实测推翻**：
 
-→ **将来网络可用时，只需 `pip install -r requirements-dev.txt`，无需改动任何测试代码。**
+- **npm registry 同样不可达**（与 PyPI 同一故障模式：DNS 解析正常、`registry.npmjs.org:443` TCP 可通，但 **TLS 握手被重置**）；
+- `node_modules` 的 170 个包中**无任何测试运行器**（无 vitest / jest / mocha / ava，也无 jsdom / happy-dom / esbuild）；
+- 本机虽有 **pnpm 12.4.2** 与 **1.9 GB 的 pnpm store**（`@localappdata%\pnpm\store\v11`），其中**确实缓存了** `vitest@4.1.8`、`jsdom@29.1.1`、`@testing-library/react@16.3.2`、`@testing-library/dom@10.4.1`、`happy-dom@20.11.6`，但**不含 `vite` 本身**（该 store 来自另一个 Vue 项目）。`pnpm install --offline` 仍需解析 `vite` 等传递依赖 → **离线安装不可行**。
+- **未采用的方案**：把项目切换到 pnpm 以复用该 store —— 这会引入 `pnpm-lock.yaml`、改变 `node_modules` 结构，属**未被请求的包管理器变更**，收益不抵风险，故不做。
 
-**T-02 已落地的环境隔离机制（本轮核心交付）**：
+**前端的兼容性做法**：
+- 契约测试写成 `tests/**/*.test.mjs`（`node:test`），可用 `npm run test:node` **立即运行**；
+- Vitest 配置与示例组件测试写成 `vitest.config.ts` + `tests/setup.ts` + `tests/example.test.tsx`，**待激活**；
+- **刻意全部放在 `src/` 之外** —— `tsconfig.app.json` 的 `include` 是 `["src"]`，若放进 `src`，`npm run build`（`tsc -b`）会因缺少 vitest 类型而失败。已实测：加入这些文件后 `tsc -b` 与 `vite build` **均 EXIT=0**。
+
+→ **网络恢复后，前端只需 `npm install -D vitest @testing-library/react @testing-library/dom jsdom`，无需改动任何测试代码。**
+
+**T-02 已落地的环境隔离机制（后端，本轮核心交付）**：
 - `tests/__init__.py` 在**导入任何应用模块之前**把 `DATABASE_URL` 指向临时文件库。
   依据：`database.py:4` 的 `load_dotenv()` **默认 `override=False`**，故先设置的环境变量不会被 `.env` 覆盖。
 - `tests/test_environment_isolation.py` 把"隔离是否真的生效"变成**可执行断言**：
@@ -283,6 +291,15 @@ active ──报告生成成功──────────▶ finished     �
   这防止了未来"跑一次测试就改写线上数据"的事故。
 
 **影响**：NFR-6 的验收方式不变（"可执行测试 + 可跑"），仅运行器不同。
+
+**T-03 前端契约测试已覆盖的内容**（零依赖，7 项全绿）：
+- 跳过词列表前端 ↔ 后端**完全一致**（守 FR-4.10 的"双份硬编码易漂移"风险）
+- 跳过词无重复/空项；数量快照 23
+- 前端每个 API 路径在后端均有对应路由（守"运行期 404 而类型系统无感"的隐患）
+- **匹配器判别力自检**：断言不存在的路径匹配不上，防止"什么都匹配"导致假通过
+- 除 `config.ts`（Bug 4 / T-34 的修复范围）外，源码不得硬编码 `127.0.0.1`
+
+**负向验证已执行**：临时在 `App.tsx` 植入一个不存在的 API 调用 → 测试由 7 通过变为 **1 失败并精确报出该路径**；还原后恢复全绿，`App.tsx` 干净还原。
 
 ---
 
