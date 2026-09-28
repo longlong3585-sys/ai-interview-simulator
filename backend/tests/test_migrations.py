@@ -32,8 +32,9 @@ from migrations.runner import (  # noqa: E402
 
 VERSIONS_DIR = os.path.join(BACKEND_DIR, "migrations", "versions")
 
-# 与 001_baseline 声明一致
-EXPECTED = {
+# 与 001_baseline 声明一致 —— 即"迁移框架接管之前就已存在的三张表"。
+# 既有库（legacy）里只有这三张，因此对它们的列/行数比对是"零改动"的判据。
+LEGACY_EXPECTED = {
     "users": ["id", "username", "hashed_password", "created_at", "role", "email",
               "is_active", "nickname", "avatar", "bio", "gender", "birthday"],
     "interview_records": ["id", "user_id", "role", "messages", "report",
@@ -41,6 +42,60 @@ EXPECTED = {
     "notifications": ["id", "user_id", "type", "message", "target_type",
                       "target_id", "is_read", "created_at", "link_url"],
 }
+
+# 002 新增的四张表。
+NEW_TABLES = {
+    "interview_sessions": ["session_id", "user_id", "role", "questions",
+                           "question_status", "user_answers", "current_index",
+                           "last_seq", "last_reply", "version", "status",
+                           "created_at", "updated_at", "expires_at",
+                           "ended_reason"],
+    "captcha_store": ["captcha_id", "code", "expires_at", "used"],
+    "auth_attempts": ["id", "ip", "attempted_at"],
+    "token_blacklist": ["jti", "expires_at"],
+}
+
+# 空库跑完全部迁移后期望的完整结构。
+EXPECTED = {}
+EXPECTED.update(LEGACY_EXPECTED)
+EXPECTED.update(NEW_TABLES)
+
+
+def _all_revisions():
+    """从迁移脚本**实际加载**出的版本列表。
+
+    刻意不写死 `["001", "002"]` —— 写死会让"新增一个迁移"变成"改一堆测试"，
+    久而久之大家就会为了测试通过而改测试，而不是为了正确而改代码。
+    """
+    return [m.revision for m in load_migrations(VERSIONS_DIR)]
+
+
+#: 破坏性语句的首关键字。`ON DELETE CASCADE` 这类**引用动作**不会命中
+#: （它的首关键字是 `REFERENCES` 所在语句的 `CREATE`）。
+DESTRUCTIVE_KEYWORDS = {"DROP", "DELETE", "TRUNCATE"}
+
+
+def _leading_keywords(statement):
+    """返回一条迁移语句里**每个 SQL 语句**的首关键字（大写）。
+
+    为什么必须按语句分析而不是按子串搜索：
+        `CREATE TABLE t (... REFERENCES users(id) ON DELETE CASCADE)`
+        含 `DELETE` 子串，但整条语句是 CREATE，不做任何删除。
+    为什么先按 `;` 切分：一条 UPGRADE_STATEMENTS 条目原则上只有一个语句
+    （`sqlite3.Connection.execute` 也只接受一个），但若有人塞进
+    `CREATE TABLE a(...); DROP TABLE b`，按语句切分才能识破。
+    """
+    import re
+
+    keywords = []
+    for chunk in statement.split(";"):
+        # 去掉 -- 行注释与 /* */ 块注释，避免注释里的词被当成关键字
+        text = re.sub(r"--[^\n]*", " ", chunk)
+        text = re.sub(r"/\*.*?\*/", " ", text, flags=re.S)
+        for token in re.findall(r"[A-Za-z_]+", text):
+            keywords.append(token.upper())
+            break
+    return keywords
 
 
 def _sha256(path):
@@ -117,13 +172,68 @@ class LoadMigrationsTests(unittest.TestCase):
         self.assertIsNone(migs[0].down_revision)
         self.assertTrue(migs[0].description)
 
-    def test_baseline_contains_no_destructive_sql(self):
-        """安全闸 4：基线脚本里不得出现 DROP / DELETE / UPDATE / TRUNCATE。"""
+    def test_no_migration_contains_destructive_statements(self):
+        """安全闸 4：任何迁移都不得出现 **破坏性语句**。
+
+        两处必须讲清楚，否则这条闸门会被误用：
+
+        1. **按"语句首关键字"判断，不能按子串判断。**
+           T-17 的 `REFERENCES users(id) ON DELETE CASCADE` 含有 `DELETE`
+           子串，但它是外键的**引用动作**，不是删除语句。
+           首版实现用 `assertNotIn("DELETE ", blob)` 直接误报 —— 见下方
+           `_leading_keywords` 的说明。
+        2. **不禁止 `ALTER`。** T-18 的既定工作就是删死列 `link_url`
+           （`ALTER TABLE ... DROP COLUMN`）。框架无法区分"被批准的
+           结构变更"与"误操作" —— 那是代码评审的职责，不是这条闸门的。
+           本闸门守的是"**框架/脚本不会自己删数据或删表**"。
+
+        基线（001）另有一条更严的约束：必须是纯 CREATE（见下一个用例）。
+        """
+        for mig in load_migrations(VERSIONS_DIR):
+            for stmt in mig.upgrade:
+                for kw in _leading_keywords(stmt):
+                    self.assertNotIn(
+                        kw, DESTRUCTIVE_KEYWORDS,
+                        "迁移 %s 含有破坏性语句（首关键字 %s）：%s"
+                        % (mig.revision, kw, stmt.strip()[:80]),
+                    )
+
+    def test_baseline_is_pure_create(self):
+        """基线必须只建对象，不得改动任何数据（v1 库接管时的第一条闸门）。"""
+        baseline = load_migrations(VERSIONS_DIR)[0]
+        self.assertEqual(baseline.revision, BASELINE_REVISION)
+        for stmt in baseline.upgrade:
+            self.assertEqual(
+                _leading_keywords(stmt)[:1], ["CREATE"],
+                "基线迁移只允许 CREATE，实得：%s" % stmt.strip()[:80],
+            )
+
+    def test_every_migration_is_idempotent_by_construction(self):
+        """安全闸 5 的静态部分：每一条 CREATE 都必须带 IF NOT EXISTS。
+
+        （运行期的幂等由 EmptyDatabaseTests.test_is_idempotent 覆盖；
+         这里检查的是**脚本写法**，能更早发现问题。）
+        """
+        for mig in load_migrations(VERSIONS_DIR):
+            for stmt in mig.upgrade:
+                head = stmt.strip().upper()
+                if head.startswith("CREATE"):
+                    self.assertIn(
+                        "IF NOT EXISTS", head,
+                        "迁移 %s 的语句缺少 IF NOT EXISTS，重复执行会失败：%s"
+                        % (mig.revision, head[:70]),
+                    )
+
+    def test_revision_chain_is_linked(self):
+        """down_revision 必须串成一条链，否则乱序执行会得到错误结构。"""
         migs = load_migrations(VERSIONS_DIR)
-        baseline = migs[0]
-        blob = "\n".join(baseline.upgrade).upper()
-        for bad in ("DROP ", "DELETE ", "UPDATE ", "TRUNCATE"):
-            self.assertNotIn(bad, blob, "基线迁移含有破坏性语句：%s" % bad)
+        self.assertIsNone(migs[0].down_revision, "第一个迁移的 down_revision 必须为空")
+        for prev, cur in zip(migs, migs[1:]):
+            self.assertEqual(
+                cur.down_revision, prev.revision,
+                "迁移链断了：%s.down_revision=%r，应为 %r"
+                % (cur.revision, cur.down_revision, prev.revision),
+            )
 
 
 class EmptyDatabaseTests(unittest.TestCase):
@@ -142,18 +252,19 @@ class EmptyDatabaseTests(unittest.TestCase):
         for table, cols in EXPECTED.items():
             self.assertEqual(_columns(self.db, table), cols, "表 %s 列不符" % table)
 
-    def test_records_baseline_revision(self):
+    def test_records_all_revisions(self):
         run(self.db, backup=False, log=lambda *a, **k: None)
         conn = sqlite3.connect(self.db)
         try:
             revs = applied_revisions(conn)
         finally:
             conn.close()
-        self.assertEqual(revs, [BASELINE_REVISION])
+        self.assertEqual(revs, _all_revisions())
 
     def test_is_idempotent(self):
+        expected = len(_all_revisions())
         first = run(self.db, backup=False, log=lambda *a, **k: None)
-        self.assertEqual(first, 1)
+        self.assertEqual(first, expected, "一次运行应把全部待应用迁移都跑掉")
         before = _sha256(self.db)
         second = run(self.db, backup=False, log=lambda *a, **k: None)
         self.assertEqual(second, 0, "重复运行不应再应用任何迁移")
@@ -176,8 +287,9 @@ class LegacyDatabaseTests(unittest.TestCase):
         self.tmp = tempfile.mkdtemp(prefix="t14-legacy-")
         self.db = os.path.join(self.tmp, "legacy.db")
         _make_legacy_db(self.db)
-        self.before_counts = _counts(self.db, EXPECTED)
-        self.before_cols = {t: _columns(self.db, t) for t in EXPECTED}
+        # 只对"接管前就存在的三张表"做零改动比对；002 新增的表不在其中
+        self.before_counts = _counts(self.db, LEGACY_EXPECTED)
+        self.before_cols = {t: _columns(self.db, t) for t in LEGACY_EXPECTED}
         self.before_hash = _sha256(self.db)
 
     def tearDown(self):
@@ -195,30 +307,37 @@ class LegacyDatabaseTests(unittest.TestCase):
         run(self.db, backup=False, dry_run=True, log=lambda *a, **k: None)
         self.assertEqual(_sha256(self.db), self.before_hash, "dry-run 改动了数据库")
 
-    def test_stamp_only_no_ddl_no_data_loss(self):
-        """核心断言：只记录版本，表结构不变、数据一行不丢。"""
+    def test_existing_tables_and_data_untouched(self):
+        """核心断言：既有三张表的结构一行不改、数据一行不丢。
+
+        注意这里**不再**断言"库里的表集合不变" —— 既有库的正确处理是
+        "stamp 基线（不建表）+ 继续应用其后的迁移"。因此 002 新增的四张表
+        **应该**出现；而接管前就存在的三张表必须原样不动。二者要分开断言，
+        否则要么误放行"既有表被改"，要么误拦"新迁移不该执行"。
+        """
         run(self.db, backup=False, log=lambda *a, **k: None)
 
         self.assertEqual(_sha256(self.db) != self.before_hash, True,
-                         "应当只多了版本表（文件必然变化），此处用于确认确实执行了 stamp")
+                         "库文件应当发生变化（版本表 + 002 新建的四张表）")
 
-        # 表集合 = 原有 3 张 + schema_migrations
-        self.assertEqual(sorted(_tables(self.db)),
-                         sorted(list(EXPECTED) + ["schema_migrations"]))
-
-        # 每个业务表的列完全不变（link_url 等原样保留）
+        # 既有三张表的结构完全不变（link_url 等原样保留）
         for table, cols in self.before_cols.items():
             self.assertEqual(_columns(self.db, table), cols,
                              "既有库的表 %s 结构被改动了" % table)
 
-        # 数据一行不丢
-        self.assertEqual(_counts(self.db, EXPECTED), self.before_counts,
+        # 既有数据一行不丢
+        self.assertEqual(_counts(self.db, LEGACY_EXPECTED), self.before_counts,
                          "既有库的数据行数发生变化 —— 可能丢数据！")
 
-        # 版本记录已写入
+        # 002 的四张新表应当被建出来
+        present = set(_tables(self.db))
+        for table in NEW_TABLES:
+            self.assertIn(table, present, "既有库上未应用 002：缺表 %s" % table)
+
+        # 全部迁移都已记录
         conn = sqlite3.connect(self.db)
         try:
-            self.assertEqual(applied_revisions(conn), [BASELINE_REVISION])
+            self.assertEqual(applied_revisions(conn), _all_revisions())
         finally:
             conn.close()
 
@@ -227,7 +346,7 @@ class LegacyDatabaseTests(unittest.TestCase):
         after_first = _sha256(self.db)
         run(self.db, backup=False, log=lambda *a, **k: None)
         self.assertEqual(_sha256(self.db), after_first, "第二次运行改动了数据库")
-        self.assertEqual(_counts(self.db, EXPECTED), self.before_counts)
+        self.assertEqual(_counts(self.db, LEGACY_EXPECTED), self.before_counts)
 
 
 class SafetyTests(unittest.TestCase):

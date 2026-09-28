@@ -72,7 +72,25 @@ def sha256_of(path):
 
 
 def backup_database(src_db, dst_db):
-    """用 sqlite3 backup API 做一致性备份（对 WAL 模式安全）。"""
+    """用 sqlite3 backup API 做一致性备份（对 WAL 模式安全）。
+
+    **并保证产物是单文件。**
+    ------------------------------------------------------------------
+    T-17 首次在 WAL 源库上跑迁移时发现：`src.backup(dst)` 会把源库的
+    文件头（含 WAL 标志）一并复制过去，于是**备份出来的库也是 WAL 模式**；
+    随后 `inspect_db()` 以 `mode=ro` 打开它，SQLite 会（重新）创建
+    `-wal` / `-shm` 附属文件，而只读连接无权删除它们 ——
+    结果 `backup/` 里多出 `xxx.db-shm`(32KB) 与 `xxx.db-wal`(0B)。
+
+    数据本身没丢（实测：只拿 `.db` 一个文件到干净目录，`integrity_check=ok`、
+    行数一致），但这是**恢复时的陷阱**：拿到备份的人会不确定
+    "到底要不要一起拷那两个文件"。备份是本项目最后一道防线
+    （T-01 / T-09 的事故都是靠它挽回的），不能留这种含糊。
+
+    因此这里显式把目标库归化为 `journal_mode=DELETE`：
+    `PRAGMA journal_mode=DELETE` 会顺带完成 checkpoint，
+    把 WAL 内容并回主文件，之后单文件即自洽。
+    """
     if not os.path.isfile(src_db):
         raise FileNotFoundError("数据库不存在: %s" % src_db)
     src = sqlite3.connect(src_db)
@@ -80,10 +98,30 @@ def backup_database(src_db, dst_db):
         dst = sqlite3.connect(dst_db)
         try:
             src.backup(dst)
+            # 归化为单文件（同时完成 checkpoint）
+            mode = dst.execute("PRAGMA journal_mode=DELETE").fetchone()[0]
+            if str(mode).lower() != "delete":
+                raise RuntimeError(
+                    "备份库无法归化为 DELETE 模式（实得 %r），"
+                    "产物可能依赖 -wal/-shm 附属文件" % mode
+                )
         finally:
             dst.close()
     finally:
         src.close()
+
+    # 兜底清理：连接已全部关闭，此刻残留的附属文件一定不含未落盘数据
+    stale = []
+    for suffix in ("-wal", "-shm"):
+        p = dst_db + suffix
+        if os.path.exists(p):
+            try:
+                os.remove(p)
+                stale.append(os.path.basename(p))
+            except OSError:
+                pass
+    if stale:
+        print("      [cleanup] 移除残留附属文件: %s" % ", ".join(stale))
     return dst_db
 
 

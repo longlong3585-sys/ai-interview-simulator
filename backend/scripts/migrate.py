@@ -26,6 +26,25 @@ DEFAULT_DB = os.path.join(
 )
 
 
+def _force_utf8_output():
+    """把 stdout/stderr 固定为 UTF-8。
+
+    为什么需要：Python 在**输出被重定向/管道捕获**时，会按
+    `locale.getpreferredencoding()`（本机是 cp936/GBK）编码，
+    **无视控制台的 `chcp 65001`**。于是迁移日志一旦写进文件、
+    被 CI 采集、或被其它程序读取，中文就会变成乱码
+    （实测：T-17 首次迁移取证时，`--dry-run` 的中文日志全部乱码）。
+
+    迁移日志是本项目的**取证材料**（谁在什么时候把库升到了哪一版），
+    乱码等于取证失效，所以这里显式固定编码。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:  # noqa: BLE001  （Python < 3.7 或非常规流）
+            pass
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Lightweight SQLite migration runner (T-14).")
     ap.add_argument("--db", default=DEFAULT_DB, help="target database path")
@@ -55,4 +74,5 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
+    _force_utf8_output()
     sys.exit(main())

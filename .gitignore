@@ -8,6 +8,11 @@
 *.sqlite
 *.sqlite3
 
+# SQLite WAL 附属文件（T-15 起应用默认以 WAL 运行，这两个文件与 *.db 同生共死）
+# 不加这条的话，只要跑过一次后端，git status 就会多出两个未跟踪文件。
+*.db-wal
+*.db-shm
+
 # Python
 __pycache__/
 *.py[cod]

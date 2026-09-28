@@ -36,17 +36,20 @@ def status(path):
         print("库不存在: %s" % path)
         return 1
 
-    size = os.path.getsize(path)
-    side = {}
-    for suffix in ("-wal", "-shm"):
-        p = path + suffix
-        side[suffix] = os.path.getsize(p) if os.path.exists(p) else None
-
     conn = sqlite3.connect(path, timeout=5.0)
     try:
         mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
     finally:
         conn.close()
+
+    # 附属文件的大小必须在**连接关闭之后**再统计。
+    # 首版在连接之前统计，于是出现过"报告 -wal 不存在、但命令跑完 -wal
+    # 就出现了"的自相矛盾 —— 因为打开连接这个动作本身会创建 -shm/-wal。
+    size = os.path.getsize(path)
+    side = {}
+    for suffix in ("-wal", "-shm"):
+        p = path + suffix
+        side[suffix] = os.path.getsize(p) if os.path.exists(p) else None
 
     print("库文件      : %s" % path)
     print("主文件大小  : %d 字节" % size)
@@ -60,6 +63,8 @@ def status(path):
         print("说明: 已处于 WAL。这是应用启动过之后的状态，属预期（ADR-002）。")
         if side["-wal"] is None:
             print("      -wal 不存在说明已 checkpoint 干净，数据全在主文件里。")
+        elif side["-wal"] == 0:
+            print("      -wal 为 0 字节表示没有未 checkpoint 的内容 —— **不是**故障。")
     else:
         print("")
         print("说明: 当前不是 WAL —— 应用尚未建立过连接，或已被还原为 %s。" % mode)

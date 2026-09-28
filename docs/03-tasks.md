@@ -17,6 +17,8 @@
 > **阶段 2 及其后所有 🔒 任务继续保持冻结**，待用户验收阶段 1 实际效果后**逐批解冻**。
 > **📌 解冻补充（2026-09-29）**：用户已解冻**阶段 2 第一批**（T-14、T-15）并指定"T-14 先讲计划、T-15 做完给手动验收指令"。
 > 本批 **T-14 / T-15 均已完成**；**T-16 起仍为 🔒 冻结**，待用户手动验收 T-15 后再逐批解冻。
+> **📌 解冻补充（2026-09-29，第二轮）**：用户验收 T-15 通过，并**授权连续执行 T-16 + T-17**（理由：纯协议图纸 + 纯 DDL 建空表，不涉及业务逻辑）。
+> **T-16 / T-17 均已完成，真库已实跑迁移**；**T-18 起仍为 🔒 冻结**，待用户确认后进入 T-18。
 > **阶段顺序不调整**：T-44 路由化按原计划执行（用户认定它是根治 Bug 2/Bug 3 的前置）。
 > **开工规则（规则 7）**：每次只做一个任务 → 读任务 → 写代码 → 写测试 → 运行测试 → 修复 → 状态改 done → `git commit` → **暂停等"继续下一个任务"**。
 
@@ -39,7 +41,8 @@
 | T-14 | ✅ 已完成 | 2026-09-29 | 见 git log | **偏离 ADR-009**：PyPI+4 镜像全不可达，Alembic 装不上 → 用户批准自建 runner（ADR-009R）。`migrations/runner.py` + `versions/001_baseline.py` + `scripts/migrate.py`；**零新增依赖**。移除 `database.py` 的 `create_all()`+手写 ALTER。**15 项测试**；破坏性验证抓到 2 个真实弱点（回滚断言过弱、dry-run 写库）并已修正 |
 | T-13 | ✅ 已完成 | 2026-09-29 | `46987b1` | 后端提取 `SKIP_WORDS` 常量 + 新增 `GET /api/interview/config`；前端删除硬编码列表改为拉取。**后端 9 项 + 前端 6 项**；**破坏性验证：20 个 subTest 失败**。检测规则含正/负样本自检 |
 | T-15 | ✅ 已完成 | 2026-09-29 | `93ed0b3` + 补充提交 | engine 运行契约：WAL + `busy_timeout=15000` + `synchronous=NORMAL` + `foreign_keys=ON` + `BEGIN IMMEDIATE`。**13 项测试**；**破坏性验证：6 个探针全部被抓住**。⚠️ 实测修正 ADR-002 的一处不准确说法：仅 `create_engine(isolation_level=None)` **不够**，须在 connect 事件里设 `dbapi_conn.isolation_level=None`。⚠️ **补充提交**：第二轮探针发现 `PRAGMA busy_timeout` 一行在引擎路径上属"观测冗余"（`sqlite3.connect(timeout=15.0)` 自带同样效果），已补判别性用例 + 独立库测试。⚠️ 已知代价：全局 `BEGIN IMMEDIATE` 使**经由本引擎的并发事务串行化**（WAL 纯读不受影响），已写成用例显式记录。**交付物**：`scripts/verify_t15.py`（人工验收工具，29 项）+ `scripts/probes/`（2 个探针复现脚本）。见 ADR-002R |
-| T-16 | ✅ 已完成 | 2026-09-29 | 见 git log | `services/stores/base.py`：**只有协议与数据类型，零实现**。3 个 `@runtime_checkable` Protocol（`SessionStore` 9 方法 / `CaptchaStore` 3 / `RateLimitStore` 4）+ 4 个 frozen dataclass + 类型化异常 + ISO 时间契约。**26 项测试**（依赖面只在标准库白名单内、禁止 SQL 泄露、方法名与**参数名**逐一断言、鸭子类型可 `isinstance`、frozen 不可变、ISO 字典序==时间序、`is_expired` 边界 `<=`）。**破坏性验证：9 个探针全部被抓住**。⚠️ 其中 2 个探针首轮是"模块导入失败"造成的**假阳性**，已改为精确命中目标断言（见提交说明）。**边界**：`token_blacklist` 表的协议**刻意不定义**，理由见下方注 |
+| T-16 | ✅ 已完成 | 2026-09-29 | `5893f78` | `services/stores/base.py`：**只有协议与数据类型，零实现**。3 个 `@runtime_checkable` Protocol（`SessionStore` 9 方法 / `CaptchaStore` 3 / `RateLimitStore` 4）+ 4 个 frozen dataclass + 类型化异常 + ISO 时间契约。**26 项测试**（依赖面只在标准库白名单内、禁止 SQL 泄露、方法名与**参数名**逐一断言、鸭子类型可 `isinstance`、frozen 不可变、ISO 字典序==时间序、`is_expired` 边界 `<=`）。**破坏性验证：9 个探针全部被抓住**。⚠️ 其中 2 个探针首轮是"模块导入失败"造成的**假阳性**，已改为精确命中目标断言（见提交说明）。**边界**：`token_blacklist` 表的协议**刻意不定义**，理由见下方注 |
+| T-17 | ✅ 已完成 | 2026-09-29 | 见 git log | `migrations/versions/002_sessions_and_stores.py`：4 张新表 + 5 个索引，**全部 `CREATE ... IF NOT EXISTS`**。`ended_reason` 直接写进 CREATE（架构 §4 的 ALTER 形式是"假设表已存在"，实际本表首次创建，结果结构一致）。**真库已实跑迁移成功**（`001` → `001, 002`，原始日志见 `docs/17-migration-log.md`）：既有数据零丢失（users=3 / records=5 不变）、`integrity_check=ok`、`foreign_key_check` 无违规。**25 项专项测试**（另有 `test_migrations.py` 由 15 → 18 项、`test_backup_tools.py` 由 9 → 14 项）。**破坏性验证：11 个探针全部被抓住**（其中 1 个首轮漏网：DDL 的 `DEFAULT 'active'` 从未被执行到 → 已补断言）。⚠️ 顺带发现并修复 3 个问题：迁移日志乱码、`journal_mode.py` 附属文件统计时序错误、**备份产物不是单文件**（见日志 §10） |
 
 > **⚠️ 操作教训（T-05 真机验证时踩到，务必记住）**
 > `job_kill` **只杀 pwsh 包装进程，不会杀 uvicorn 的 python 子进程**。残留进程会继续占着 8000 端口，导致：
@@ -93,15 +96,16 @@
 
 ---
 
-## 阶段 2 已完成情况（T-14 ~ T-16）
+## 阶段 2 已完成情况（T-14 ~ T-17）
 
 | 任务 | 提交 | 内容 |
 |---|---|---|
 | T-14 自建迁移 runner（ADR-009R 偏离审批） | `59b7758` | `migrations/runner.py` + `versions/001_baseline.py` + `scripts/migrate.py`；`schema_migrations` 表；五道安全闸（强制备份 / 只读预检 / `BEGIN IMMEDIATE` 事务 / 框架层禁 DROP·DELETE / 幂等）。移除 `database.py` 的 `create_all()` + 手写 ALTER |
 | T-15 engine 运行契约 | `93ed0b3` + 补充提交 | WAL + `busy_timeout=15000` + `synchronous=NORMAL` + `foreign_keys=ON` + `BEGIN IMMEDIATE`；新增 ADR-002R |
-| T-16 存储抽象层协议 | 见 git log | `services/stores/base.py`：3 个 `runtime_checkable` Protocol + 4 个 frozen dataclass + 类型化异常 + ISO 时间契约；**零实现、零第三方依赖、零 SQL** |
+| T-16 存储抽象层协议 | `5893f78` | `services/stores/base.py`：3 个 `runtime_checkable` Protocol + 4 个 frozen dataclass + 类型化异常 + ISO 时间契约；**零实现、零第三方依赖、零 SQL** |
+| T-17 迁移 002：四张新表 | 见 git log | `versions/002_sessions_and_stores.py`；**真库已实跑成功**（`001` → `001, 002`，日志 `docs/17-migration-log.md`）；顺带修复备份产物非单文件等 3 个问题 |
 
-**测试规模**：后端 **174 项**（阶段 1 结束时 114，阶段 2 已 +60）＋ 前端 **13 项**，全部通过。
+**测试规模**：后端 **207 项**（阶段 1 结束时 114，阶段 2 已 +93）＋ 前端 **13 项**，全部通过。
 **本批偏差/事故均已记录**：T-14 的 `--dry-run` 曾在真库创建空表（已清理并加固为纯只读）；T-15 修正了 ADR-002 关于 `isolation_level` 的不准确说法，并在第二轮探针中补齐 `busy_timeout` 的判别力缺口（见 ADR-002R）。
 
 **T-15 交付物**
@@ -123,7 +127,7 @@
    │
    ├──▶ 阶段1 后端安全止血 (T-04~13)  ← 不碰数据库，可立即开工
    │
-   └──▶ 阶段2 存储层重构 (T-14~22)   ← T-14/T-15 已解冻并完成；T-16 起仍冻结
+   └──▶ 阶段2 存储层重构 (T-14~22)   ← T-14~T-17 已完成；T-18 起仍冻结
              │
              └──▶ 阶段3 Bug修复 🔒 (T-23~33)   ← 依赖新存储
                        │
@@ -190,7 +194,7 @@
 | T-14 | **存储重构** | 引入 Alembic → **改为自建轻量 runner**（见 ADR-009R）；建立基线 + runbook | 4h | T-02 | ✅ |
 | T-15 | **存储重构** | engine 配置：WAL + `busy_timeout=15000` + `foreign_keys=ON` + `isolation_level=None` + `BEGIN IMMEDIATE` 事件 | 3h | T-14 | ✅ |
 | T-16 | **存储重构** | `services/stores/` 抽象层协议（`SessionStore`/`CaptchaStore`/`RateLimitStore`） | 2h | T-15 | ✅ |
-| T-17 | **存储重构** | 迁移：新增 4 张表（`interview_sessions`/`captcha_store`/`auth_attempts`/`token_blacklist`） | 3h | T-16 | 🔒 |
+| T-17 | **存储重构** | 迁移：新增 4 张表（`interview_sessions`/`captcha_store`/`auth_attempts`/`token_blacklist`） | 3h | T-16 | ✅ |
 | T-18 | **存储重构** | 迁移：既有表变更（`client_token` / `must_change_password` / 删死列 `link_url`） | 3h | T-17 | 🔒 |
 | T-19 | **存储重构** | `SQLiteSessionStore`：乐观锁 `version` + `seq` 幂等 + 状态机 + 短事务 | 4h | T-18 | 🔒 |
 | T-20 | **存储重构** | `SQLiteCaptchaStore`（TTL 300s，一次性） | 2h | T-18 | 🔒 |
@@ -205,6 +209,10 @@
   ⚠️ **原始验收语"提供 SQLite 实现"不属于本任务**：实现是 T-19 / T-20 / T-21。T-16 的可验证等价物是"**协议层不绑定任何存储**"（上面那组断言），"不含任何 Redis 代码"则由"只依赖标准库 + 无 Redis API 词汇"共同保证。
   📌 **刻意不定义 `token_blacklist` 的协议**：该表在 T-17 建，但它挂在 **ADR-003 选 B（P1）** 之下，且 `jti` 是否"续期沿用同一条"（ADR-016 第 5 点）尚未落地。在没有调用方的情况下提前定接口，会把未定的语义**锁死**。等 ADR-003-B 真正开工时再补协议 —— 届时它与 `create_access_token` 的改动属同一批。
 - T-17：4 张表建成；`UNIQUE(user_id) WHERE status='active'` 生效（同用户第二个 active 被拒，`finished`/`abandoned` 可并存）
+  **实际验收**：真库已实跑迁移（`001` → `001, 002`，**日志见 `docs/17-migration-log.md`**）；四张表 + 5 个索引齐备；部分唯一索引实测三条语义（第二个 active 被拒 / 置 `abandoned` 后立刻可重开 / 多条终态并存）；`ON DELETE CASCADE` 实测级联；既有表**零改动**（无 `client_token`、仍有 `link_url`）、既有数据零丢失（users=3 / records=5）、`integrity_check=ok`、`foreign_key_check` 无违规。
+  **跨层一致性**：`interview_sessions` 的列集合必须恰好等于 T-16 `SessionSnapshot` 的字段集合 —— 两个方向各有一条断言（`test_session_columns_match_protocol_snapshot` 与 `test_snapshot_fields_match_interview_sessions_columns`），只改一边会立刻报错。
+  ⚠️ **形式偏离（结果一致）**：架构 §4 写的是 `ALTER TABLE interview_sessions ADD COLUMN ended_reason`，那是假设该表已存在。实际上本表在 T-17 才首次创建，故该列**直接写进 `CREATE TABLE`**。已在迁移文件里记录唯一的风险场景（若某环境曾手工建过 v2.1 版本的表，`IF NOT EXISTS` 会跳过建表导致缺列），并有断言兜底。
+  📌 **框架安全闸的一处口径修正**：原 `test_baseline_contains_no_destructive_sql` 用子串匹配，会被 `REFERENCES users(id) ON DELETE CASCADE` **误报**。已改为**按语句首关键字**判断（并先按 `;` 切分），且把只查基线扩展到**遍历全部迁移** —— 原先新增迁移时存在检查盲区。
 - T-18：`client_token` UNIQUE 生效（经 `batch_alter_table`）；死列 `link_url` 已移除；既有数据保留
 - T-19：**并发测试**：两请求同 `version` 并发 → 一个成功、一个 **409**（不静默覆盖）；同 `seq` 重发 → 返回缓存 `last_reply` **且不重复调用 AI**
 - T-20：验证码 300s 后失效；同一验证码**只能用一次**；多 worker 下均可用
