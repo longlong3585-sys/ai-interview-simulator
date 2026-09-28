@@ -56,6 +56,30 @@ def delete_users(usernames):
         db.close()
 
 
+def set_user_active(username, active):
+    """切换用户的 is_active（模拟管理员启用/禁用）。返回是否找到了该用户。"""
+    db = SessionLocal()
+    try:
+        user = db.query(User).filter(User.username == username).first()
+        if user is None:
+            return False
+        user.is_active = bool(active)
+        db.commit()
+        return True
+    finally:
+        db.close()
+
+
+def get_user_active(username):
+    """读取用户当前的 is_active；用户不存在返回 None。"""
+    db = SessionLocal()
+    try:
+        user = db.query(User).filter(User.username == username).first()
+        return None if user is None else bool(user.is_active)
+    finally:
+        db.close()
+
+
 def make_docx_bytes(lines):
     """内存中生成一份真实 DOCX，用于上传测试（不落盘）。"""
     import io

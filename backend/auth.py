@@ -137,6 +137,22 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
     user = db.query(User).filter(User.username == username).first()
     if user is None:
         raise credentials_exception
+
+    # T-06 / FR-2.6：令牌有效 ≠ 可以继续使用。
+    # 账号被管理员禁用后，此前签发的令牌在有效期内仍会被放行
+    # （JWT 无状态，默认 30 分钟；ADR-016 引入滑动续期后窗口更长），
+    # 因此必须在鉴权链**最底层**统一拦截。
+    # get_current_admin_user 与 require_user 都依赖本函数 —— 一处修改即全覆盖。
+    #
+    # 状态码选型：返回 401 而非 403。理由：
+    #   1. 前端 services/api.ts 只把 401 视为"需重新登录"，会清理本地状态；
+    #      返回 403 会让被禁用用户停在"看起来已登录但什么都做不了"的状态；
+    #   2. 语义上该账号已不再是有效主体，与"登录失败"一致
+    #      （authenticate_user 对 is_active=False 同样拒绝）。
+    # 01-spec.md FR-2.6 的验收标准为"401/403 任一即可"，此处取 401。
+    if not user.is_active:
+        raise HTTPException(status_code=401, detail="账号已被禁用，请联系管理员")
+
     return user
 
 

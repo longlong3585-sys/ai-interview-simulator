@@ -27,6 +27,7 @@
 | T-03 | ✅ 已完成 | 2026-09-28 | 见 git log | Vitest+RTL 配置**待激活**（npm registry 不可达）；当前以零依赖 `node:test` 运行**契约测试 7 项全绿**（跳过词一致性 / API 路径对齐 / 匹配器判别力）。`tsc -b` 与 `vite build` 均 EXIT=0（测试文件置于 `src/` 外，不破坏构建） |
 | T-04 | ✅ 已完成 | 2026-09-28 | 见 git log | `/api/chat` 挂 `require_user` + 身份改用 `current_user.id`；`ChatRequest.user_id` 已移除。**9 项测试**（含伪造 user_id 无效）；**破坏性验证：移除鉴权后 8/9 失败**。真机验证：无 token→401、伪造 user_id→被忽略 |
 | T-05 | ✅ 已完成 | 2026-09-29 | 见 git log | `/api/resume/upload` 挂 `get_current_user`（**刻意不用 `require_user`**，否则 admin 会被 403）。**10 项测试**；**破坏性验证：移除鉴权后 3/10 失败**。真机验证：无 token→401、带 token+txt→400、DOCX→200、**admin→200**；OpenAPI schema 现已声明 security。顺带抽出 `tests/support.py` 消重 |
+| T-06 | ✅ 已完成 | 2026-09-29 | 见 git log | `get_current_user` 增加 `is_active` 校验（**改在鉴权链最底层，一处覆盖三条依赖链**）。**10 项测试**；**破坏性验证：移除校验后 10/10 全部失败**（迄今最强）。真机验证：启用→200、禁用→**401「账号已被禁用」**、其他 3 个接口同样 401、重新启用→200。测试期间临时禁用过真实用户 123，**已确认还原为 is_active=1** |
 
 > **⚠️ 操作教训（T-05 真机验证时踩到，务必记住）**
 > `job_kill` **只杀 pwsh 包装进程，不会杀 uvicorn 的 python 子进程**。残留进程会继续占着 8000 端口，导致：
@@ -89,7 +90,7 @@
 |---|---|---|---|---|---|
 | T-04 | **修复 Bug** | `/api/chat` 挂 `require_user`，改用 `current_user.id`（不再读请求体） | 2h | T-02 | ✅ |
 | T-05 | **修复 Bug** | `/api/resume/upload` 挂 `get_current_user` | 1h | T-04 | ✅ |
-| T-06 | **修复 Bug** | `get_current_user` 增加 `is_active` 校验（FR-2.6） | 1h | T-02 | ⬜ |
+| T-06 | **修复 Bug** | `get_current_user` 增加 `is_active` 校验（FR-2.6） | 1h | T-02 | ✅ |
 | T-07 | **修复 Bug** | `SECRET_KEY` 缺失即启动失败，移除硬编码回退（NFR-1c） | 1h | — | ⬜ |
 | T-08 | **修复 Bug** | 抽出 `validate_password()`，注册/改密共用同一规则（FR-1.1/1.5） | 3h | T-02 | ⬜ |
 | T-09 | **修复 Bug** | 头像上传后端校验：≤2MB + 魔数 + 扩展名白名单 + 统一重命名（FR-10.4） | 3h | T-02 | ⬜ |
