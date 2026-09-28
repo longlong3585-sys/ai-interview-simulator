@@ -46,3 +46,6 @@ logs/
 
 # 环境覆盖文件
 docker-compose.override.yml
+
+# 回滚备份点（T-01）：数据库备份 / 源码归档 / 清单，均不入库
+backup/
