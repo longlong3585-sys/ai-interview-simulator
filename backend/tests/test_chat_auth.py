@@ -1,0 +1,216 @@
+"""T-04 测试：/api/chat 的鉴权与身份来源（FR-2.4 / Bug 1）。
+
+覆盖的核心风险：
+  1. 无令牌 / 令牌无效 / 令牌过期 → 必须 401（修复前该接口完全裸奔）
+  2. **请求体里伪造他人 user_id → 必须完全无效**（修复前可串号读写他人会话）
+  3. 身份只来自 JWT（sub = username → 查库得到 current_user.id）
+  4. admin 被 require_user 拒绝（403，既有设计，纳入回归）
+
+AI 调用一律被 mock，测试**不发真实网络请求**，保证确定性与速度。
+"""
+
+import unittest
+from datetime import timedelta
+from unittest.mock import patch
+
+from fastapi.testclient import TestClient
+
+import main  # noqa: E402  —— 环境隔离由 tests/__init__.py 保证
+from auth import create_access_token
+from database import SessionLocal, User
+from routers.interview import interview_sessions
+
+QUESTIONS = ["Q1 项目经历？", "Q2 技术栈？", "Q3 难点？"]
+
+
+class _FakeMessage:
+    content = "（mock）回答得不错，我们继续。"
+
+
+class _FakeChoice:
+    message = _FakeMessage()
+
+
+class _FakeResponse:
+    choices = [_FakeChoice()]
+
+
+def _fake_ai_create(*args, **kwargs):
+    """替身 AI：不发网络请求，立即返回固定反馈。"""
+    return _FakeResponse()
+
+
+def _seed_session(user_id, current_index=0):
+    interview_sessions[user_id] = {
+        "user_id": user_id,
+        "role": "后端开发",
+        "questions": list(QUESTIONS),
+        "current_index": current_index,
+        "question_status": ["pending"] * len(QUESTIONS),
+        "user_answers": [""] * len(QUESTIONS),
+        "finished": False,
+    }
+
+
+class ChatAuthTests(unittest.TestCase):
+
+    @classmethod
+    def setUpClass(cls):
+        cls.client = TestClient(main.app)
+        cls.client.__enter__()  # 触发 startup（与生产一致）
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.client.__exit__(None, None, None)
+
+    def setUp(self):
+        interview_sessions.clear()
+        db = SessionLocal()
+        try:
+            self.user_a = User(
+                username="t04_alice", hashed_password="x",
+                email="t04_alice@test.local", role="user", is_active=True,
+            )
+            self.user_b = User(
+                username="t04_bob", hashed_password="x",
+                email="t04_bob@test.local", role="user", is_active=True,
+            )
+            self.admin = User(
+                username="t04_admin", hashed_password="x",
+                email="t04_admin@test.local", role="admin", is_active=True,
+            )
+            db.add_all([self.user_a, self.user_b, self.admin])
+            db.commit()
+            for u in (self.user_a, self.user_b, self.admin):
+                db.refresh(u)
+            self.id_a, self.id_b = self.user_a.id, self.user_b.id
+            self.token_a = create_access_token(
+                {"sub": self.user_a.username, "role": "user"},
+                expires_delta=timedelta(minutes=30),
+            )
+            self.token_admin = create_access_token(
+                {"sub": self.admin.username, "role": "admin"},
+                expires_delta=timedelta(minutes=30),
+            )
+        finally:
+            db.close()
+
+    def tearDown(self):
+        interview_sessions.clear()
+        db = SessionLocal()
+        try:
+            db.query(User).filter(
+                User.username.in_(["t04_alice", "t04_bob", "t04_admin"])
+            ).delete(synchronize_session=False)
+            db.commit()
+        finally:
+            db.close()
+
+    def _post_chat(self, body, token=None):
+        headers = {"Authorization": "Bearer %s" % token} if token else {}
+        return self.client.post("/api/chat", json=body, headers=headers)
+
+    # ---------- 1. 鉴权 ----------
+
+    def test_chat_without_token_returns_401(self):
+        """无令牌必须 401（修复前为 200，属严重漏洞）。"""
+        r = self._post_chat({"message": "你好", "role": "后端开发"})
+        self.assertEqual(r.status_code, 401, "无令牌竟然被放行：%s" % r.text)
+
+    def test_chat_with_malformed_token_returns_401(self):
+        r = self._post_chat({"message": "你好"}, token="not-a-real-jwt")
+        self.assertEqual(r.status_code, 401)
+
+    def test_chat_with_expired_token_returns_401(self):
+        expired = create_access_token(
+            {"sub": self.user_a.username, "role": "user"},
+            expires_delta=timedelta(minutes=-5),
+        )
+        r = self._post_chat({"message": "你好"}, token=expired)
+        self.assertEqual(r.status_code, 401)
+
+    def test_chat_with_token_of_deleted_user_returns_401(self):
+        ghost = create_access_token(
+            {"sub": "t04_ghost_does_not_exist", "role": "user"},
+            expires_delta=timedelta(minutes=30),
+        )
+        r = self._post_chat({"message": "你好"}, token=ghost)
+        self.assertEqual(r.status_code, 401)
+
+    def test_admin_is_rejected_by_require_user(self):
+        """admin 不能进行面试（既有设计，纳入回归）。"""
+        r = self._post_chat({"message": "你好"}, token=self.token_admin)
+        self.assertEqual(r.status_code, 403)
+
+    # ---------- 2. 伪造 user_id（核心） ----------
+
+    def test_forged_user_id_cannot_advance_another_users_session(self):
+        """用 A 的令牌 + 伪造 B 的 user_id：只能动 A 的会话，B 的必须原封不动。"""
+        _seed_session(self.id_a)
+        _seed_session(self.id_b)
+
+        with patch("routers.interview.client.chat.completions.create", side_effect=_fake_ai_create):
+            r = self._post_chat(
+                {"message": "我是 A 的回答", "role": "后端开发", "user_id": self.id_b},
+                token=self.token_a,
+            )
+
+        self.assertEqual(r.status_code, 200, r.text)
+
+        sess_a = interview_sessions[self.id_a]
+        sess_b = interview_sessions[self.id_b]
+
+        # A 的会话被推进
+        self.assertEqual(sess_a["current_index"], 1, "A 的会话未被推进")
+        self.assertEqual(sess_a["question_status"][0], "answered")
+        self.assertEqual(sess_a["user_answers"][0], "我是 A 的回答")
+
+        # B 的会话必须完全没被动过 —— 这是修复前最严重的串号问题
+        self.assertEqual(sess_b["current_index"], 0, "B 的会话被伪造请求推进了！")
+        self.assertEqual(sess_b["question_status"][0], "pending", "B 的题目状态被改写！")
+        self.assertEqual(sess_b["user_answers"][0], "", "B 的作答被覆盖！")
+
+    def test_forged_user_id_does_not_change_response_identity(self):
+        """伪造 user_id 时，响应里的 current_index 必须取自令牌用户自己的会话。
+
+        注：A 从 index=1 作答后变成 2（题目共 3 道，未结束），响应才带 current_index；
+        若答到 >= 题目数，既有实现会返回 finished 且**不含** current_index
+        （该契约怪癖由 T-23 重构会话接口时统一处理）。
+        """
+        _seed_session(self.id_a, current_index=1)  # A 已答 1 题
+        _seed_session(self.id_b, current_index=0)  # B 在第 1 题
+
+        with patch("routers.interview.client.chat.completions.create", side_effect=_fake_ai_create):
+            r = self._post_chat(
+                {"message": "回答", "user_id": self.id_b},
+                token=self.token_a,
+            )
+
+        data = r.json()
+        # A 的进度是 2；若代码错误地用了 B，会得到 1
+        self.assertEqual(
+            data.get("current_index"), 2,
+            "返回的进度不是令牌用户(A)的进度：%s" % data,
+        )
+
+    def test_body_user_id_is_simply_ignored_when_absent(self):
+        """请求体不带 user_id 时行为不变（身份仍来自令牌）。"""
+        _seed_session(self.id_a)
+        with patch("routers.interview.client.chat.completions.create", side_effect=_fake_ai_create):
+            r = self._post_chat({"message": "回答"}, token=self.token_a)
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(interview_sessions[self.id_a]["current_index"], 1)
+
+    def test_unknown_extra_body_fields_are_tolerated(self):
+        """Pydantic 默认忽略多余字段：旧前端仍发送 user_id 不应导致 422。"""
+        _seed_session(self.id_a)
+        with patch("routers.interview.client.chat.completions.create", side_effect=_fake_ai_create):
+            r = self._post_chat(
+                {"message": "回答", "user_id": self.id_b, "some_future_field": 123},
+                token=self.token_a,
+            )
+        self.assertEqual(r.status_code, 200, "多余字段不应导致 422：%s" % r.text)
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

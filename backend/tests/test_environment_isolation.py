@@ -77,11 +77,15 @@ class TestEnvironmentIsolation(unittest.TestCase):
 
         remaining = database.SessionLocal()
         try:
-            self.assertEqual(
-                remaining.query(database.User).count(),
-                0,
-                "探针数据未被清理干净",
+            # 只断言"自己的探针"被清掉，**不能**断言整表为 0：
+            # 其他测试（如 test_chat_auth 触发的应用 startup）会创建 admin 账号，
+            # 断言空表会让本用例依赖执行顺序。
+            leftover = (
+                remaining.query(database.User)
+                .filter(database.User.username == "__isolation_probe__")
+                .count()
             )
+            self.assertEqual(leftover, 0, "探针数据未被清理干净")
         finally:
             remaining.close()
 

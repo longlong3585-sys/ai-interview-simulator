@@ -25,6 +25,7 @@
 | T-01 | ✅ 已完成 | 2026-09-28 | `0d58240` | 回滚点 tag `rollback-before-refactor`；`make_backup.py` / `verify_backup.py`；正向 exit 0、**负向测试 exit 1** 均通过 |
 | T-02 | ✅ 已完成 | 2026-09-28 | 见 git log | 移除 `**/test_*.py` 忽略；忽略根目录 `*.docx`；建立 unittest 测试骨架 + **独立测试库隔离**（16 项测试全绿）。**偏差**：PyPI 不可达 → 以 stdlib `unittest` 运行（见 ADR-021R） |
 | T-03 | ✅ 已完成 | 2026-09-28 | 见 git log | Vitest+RTL 配置**待激活**（npm registry 不可达）；当前以零依赖 `node:test` 运行**契约测试 7 项全绿**（跳过词一致性 / API 路径对齐 / 匹配器判别力）。`tsc -b` 与 `vite build` 均 EXIT=0（测试文件置于 `src/` 外，不破坏构建） |
+| T-04 | ✅ 已完成 | 2026-09-28 | 见 git log | `/api/chat` 挂 `require_user` + 身份改用 `current_user.id`；`ChatRequest.user_id` 已移除。**9 项测试**（含伪造 user_id 无效）；**破坏性验证：移除鉴权后 8/9 失败**。真机验证：无 token→401、伪造 user_id→被忽略 |
 
 > **🔒 冻结范围**：`backend/database.py`、engine 配置、`SessionLocal`、`create_engine`/PRAGMA/连接池、建表语句、`services/stores/`、Alembic 迁移 —— 即 **阶段 2 全部**，以及**阶段 3 全部**（均依赖新存储）。
 > **解冻条件**：用户审批本清单 → 移除 🔒 → 按依赖顺序开工。
@@ -73,14 +74,14 @@
 
 | ID | 类别 | 任务 | 工时 | 依赖 | 标记 |
 |---|---|---|---|---|---|
-| T-04 | **修复 Bug** | `/api/chat` 挂 `require_user`，改用 `current_user.id`（不再读请求体） | 2h | T-02 | ⬜ |
+| T-04 | **修复 Bug** | `/api/chat` 挂 `require_user`，改用 `current_user.id`（不再读请求体） | 2h | T-02 | ✅ |
 | T-05 | **修复 Bug** | `/api/resume/upload` 挂 `get_current_user` | 1h | T-04 | ⬜ |
 | T-06 | **修复 Bug** | `get_current_user` 增加 `is_active` 校验（FR-2.6） | 1h | T-02 | ⬜ |
 | T-07 | **修复 Bug** | `SECRET_KEY` 缺失即启动失败，移除硬编码回退（NFR-1c） | 1h | — | ⬜ |
 | T-08 | **修复 Bug** | 抽出 `validate_password()`，注册/改密共用同一规则（FR-1.1/1.5） | 3h | T-02 | ⬜ |
 | T-09 | **修复 Bug** | 头像上传后端校验：≤2MB + 魔数 + 扩展名白名单 + 统一重命名（FR-10.4） | 3h | T-02 | ⬜ |
 | T-10 | **修复 Bug** | 统一 `safe_json_loads()`，修复 `user.py:110,118` 空值保护（FR-6.4） | 2h | T-02 | ⬜ |
-| T-11 | **修复 Bug** | 死参数清理：后端删 `action`/`ReportRequest.user_id`，前端同步移除（FR-4.9） | 2h | T-02 | ⬜ |
+| T-11 | **修复 Bug** | 死参数清理：后端删 `action`（`ChatRequest.user_id` 已于 T-04 移除）与 `ReportRequest.user_id`，前端同步移除 | 2h | T-04 | ⬜ |
 | T-12 | **修复 Bug** | 全局异常处理器记录堆栈到日志，对外仍返回通用消息（NFR-2） | 1h | — | ⬜ |
 | T-13 | **新功能** | 跳过词单一来源：后端常量 + `GET /api/interview/config`（FR-4.10） | 2h | T-02 | ⬜ |
 

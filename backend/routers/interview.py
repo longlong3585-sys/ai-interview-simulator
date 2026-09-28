@@ -31,15 +31,18 @@ def _is_skip_message(user_message: str) -> bool:
 
 
 @router.post("/chat")
-async def chat(req: ChatRequest):
+async def chat(req: ChatRequest, current_user: User = Depends(require_user)):
     user_message = req.message.strip()
     lower_msg = user_message.lower()
     is_skip = _is_skip_message(user_message)
 
-    user_id = req.user_id
-    session = interview_sessions.get(user_id) if user_id else None
+    # T-04 / FR-2.4（Bug 1）：身份**一律取自令牌**，绝不再读请求体。
+    # 修复前该接口无任何鉴权依赖，且用客户端自报的 user_id 取会话，
+    # 导致未登录即可调用（白嫖 AI 额度）并读写他人的面试会话（串号）。
+    user_id = current_user.id
+    session = interview_sessions.get(user_id)
 
-    if user_id and session:
+    if session:
         idx = session["current_index"]
         questions = session["questions"]
         statuses = session["question_status"]
