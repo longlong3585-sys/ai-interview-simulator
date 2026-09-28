@@ -1,7 +1,17 @@
 import os
 from dotenv import load_dotenv
 
-load_dotenv(os.path.join(os.path.dirname(__file__), '.env'))
+# T-07 补强：允许用 APP_ENV_FILE 指定 .env 路径。
+#
+# 动机：原来的写法把路径写死，导致"真实 .env 文件里漏配 SECRET_KEY"这一
+# **生产最可能发生的场景**无法被测试覆盖（单元测试只能 mock 掉 load_dotenv，
+# 而那恰好绕过了真实文件路径 —— 也正因如此，我第一次给出的手工验证指令是错的：
+# PowerShell 的 $env:SECRET_KEY="" 实际是【删除】变量，load_dotenv 随后又从
+# .env 把值补了回来，根本没进入"缺失"分支）。
+#
+# 不设置该变量时行为与之前完全一致。
+_ENV_FILE = os.getenv("APP_ENV_FILE") or os.path.join(os.path.dirname(__file__), ".env")
+load_dotenv(_ENV_FILE)
 
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 if not DEEPSEEK_API_KEY:

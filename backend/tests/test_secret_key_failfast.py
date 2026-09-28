@@ -15,6 +15,8 @@
 
 import importlib
 import os
+import shutil
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -110,6 +112,111 @@ class SecretKeyFailFastTests(unittest.TestCase):
             with self.assertRaises(ValueError) as ctx:
                 importlib.reload(config)
         self.assertIn("DEEPSEEK_API_KEY", str(ctx.exception))
+
+
+class RealEnvFileTests(unittest.TestCase):
+    """T-07 补强：用**真实 .env 文件**验证，不 mock load_dotenv。
+
+    为什么必须补这一组：
+      上面那些用例都 mock 掉了 load_dotenv，等于绕开了"真实文件"这条路径。
+      而生产上最可能出问题的恰恰是：**.env 文件存在、但漏配 SECRET_KEY**。
+      正是这个盲区导致我第一次给用户的手工验证指令是错的
+      （PowerShell 的 `$env:SECRET_KEY=""` 实际是删除变量，load_dotenv 随后
+      又从真 .env 把值补了回来，于是"验证"通过但什么也没验证到）。
+    """
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp(prefix="t07-envfile-")
+        self.env_path = os.path.join(self.tmpdir, ".env")
+
+    def tearDown(self):
+        importlib.reload(config)  # 恢复正常配置
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _write_env(self, body):
+        with open(self.env_path, "w", encoding="utf-8") as f:
+            f.write(body)
+
+    def _load_with_real_env_file(self):
+        """让 config 去读我们造的 .env 文件，并把 SECRET_KEY 从进程环境里清掉。
+
+        清掉是必要的：python-dotenv 的 override=False 规则是"键已存在就不覆盖"，
+        若不清，外部环境的值会掩盖 .env 的内容。
+        """
+        env = {k: v for k, v in REAL_ENV.items() if k not in ("SECRET_KEY", "APP_ENV_FILE")}
+        env["APP_ENV_FILE"] = self.env_path
+        with patch.dict(os.environ, env, clear=True):
+            try:
+                importlib.reload(config)
+                return None
+            except ValueError as exc:
+                return exc
+
+    def test_real_env_file_without_secret_key_raises(self):
+        """生产最常见漏配：.env 有 API Key，但漏了 SECRET_KEY。"""
+        self._write_env(
+            "DEEPSEEK_API_KEY=sk-real-looking-key\n"
+            "OPENAI_BASE_URL=https://api.deepseek.com/v1\n"
+        )
+        exc = self._load_with_real_env_file()
+        self.assertIsNotNone(
+            exc,
+            ".env 文件里漏配 SECRET_KEY 时竟然启动成功 —— fail-fast 未生效",
+        )
+        self.assertIn("SECRET_KEY", str(exc))
+
+    def test_real_env_file_with_empty_secret_key_raises(self):
+        """另一种常见写法：写了键但值是空的。"""
+        self._write_env(
+            "DEEPSEEK_API_KEY=sk-real-looking-key\n"
+            "SECRET_KEY=\n"
+        )
+        exc = self._load_with_real_env_file()
+        self.assertIsNotNone(exc, "SECRET_KEY 为空值时竟然启动成功")
+        self.assertIn("SECRET_KEY", str(exc))
+
+    def test_real_env_file_with_placeholder_raises(self):
+        self._write_env(
+            "DEEPSEEK_API_KEY=sk-real-looking-key\n"
+            "SECRET_KEY=change-this-to-a-random-string-at-least-64-chars\n"
+        )
+        exc = self._load_with_real_env_file()
+        self.assertIsNotNone(exc, "占位符竟然被接受")
+        self.assertIn("占位符", str(exc))
+
+    def test_real_env_file_with_valid_secret_key_loads(self):
+        """正样本：配置完整时必须能正常加载（防止修得过头把正常部署也锁死）。"""
+        self._write_env(
+            "DEEPSEEK_API_KEY=sk-real-looking-key\n"
+            "SECRET_KEY=%s\n" % VALID_KEY
+        )
+        exc = self._load_with_real_env_file()
+        self.assertIsNone(exc, "配置完整时不应报错，实际：%s" % exc)
+        self.assertEqual(config.SECRET_KEY, VALID_KEY)
+
+    def test_missing_env_file_entirely_reports_deepseek_first(self):
+        """连 .env 都没有时，先报 DEEPSEEK_API_KEY（两者都缺的既有优先级）。"""
+        env = {k: v for k, v in REAL_ENV.items()
+               if k not in ("SECRET_KEY", "DEEPSEEK_API_KEY", "APP_ENV_FILE")}
+        env["APP_ENV_FILE"] = os.path.join(self.tmpdir, "does-not-exist.env")
+        with patch.dict(os.environ, env, clear=True):
+            with self.assertRaises(ValueError) as ctx:
+                importlib.reload(config)
+        self.assertIn("DEEPSEEK_API_KEY", str(ctx.exception))
+
+    def test_legacy_env_var_removal_does_not_disable_the_check(self):
+        """还原用户当时的操作：变量被"置空"（实为删除），但真 .env 仍在。
+
+        此时应当**从 .env 正常取值**（这是 dotenv 的预期行为），
+        而不是误报错误 —— 用用例把这个语义钉死，避免以后又被误判为 bug。
+        """
+        self._write_env(
+            "DEEPSEEK_API_KEY=sk-real-looking-key\n"
+            "SECRET_KEY=%s\n" % VALID_KEY
+        )
+        exc = self._load_with_real_env_file()  # 内部已清掉外部 SECRET_KEY
+        self.assertIsNone(exc)
+        self.assertEqual(config.SECRET_KEY, VALID_KEY)
 
 
 if __name__ == "__main__":
