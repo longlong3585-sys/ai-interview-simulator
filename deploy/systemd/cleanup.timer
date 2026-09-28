@@ -1,0 +1,27 @@
+[Unit]
+Description=AI 面试系统 · 定时触发数据清理（每 15 分钟）
+Documentation=file:///opt/interview/docs/02-architecture.md
+
+[Timer]
+# 每 15 分钟一次（0、15、30、45 分）。
+# 选 15 分钟的依据：
+#   * 验证码 TTL 300 秒、限流窗口 10 分钟、会话 TTL 2 小时 —— 15 分钟对本任务
+#     都不是精度瓶颈（**正确性不依赖定时器**：会话过期是"惰性判定"，
+#     读取时就会判过期；验证码同理。定时器只负责回收空间与释放唯一锁）。
+#   * 频率再高只是无谓的写放大；再低会让 abandoned 释放唯一锁变慢。
+OnCalendar=*:0/15
+
+# 机器关机/休眠期间错过的触发，开机后**补跑一次**。
+# 清理是幂等的，补跑无害；不补的话长时间停机会留下一堆过期行。
+Persistent=true
+
+# 随机延迟最多 1 分钟：避免和其它定时任务在同一秒抢写锁
+RandomizedDelaySec=60
+
+# 精确到分钟即可，不需要秒级对齐
+AccuracySec=1min
+
+Unit=cleanup.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,46 @@
+[Unit]
+Description=AI 面试系统 · 数据生命周期清理（会话置 abandoned / 验证码与限流记录清除）
+Documentation=file:///opt/interview/docs/02-architecture.md
+# 只依赖本地文件系统；不需要网络，但需要数据库所在目录可用
+After=network.target
+
+[Service]
+# oneshot：跑完即退出，不留常驻进程。
+# 这也是"只运行一个实例"的第二层保障 —— systemd 不会在同一个 unit
+# 的上一轮还没结束时再启动一轮（第一层是 cleanup.py 自己的文件锁）。
+Type=oneshot
+
+# ⚠️ 部署时请改成实际路径（见 deploy/systemd/README.md）
+WorkingDirectory=/opt/interview/backend
+ExecStart=/opt/interview/backend/venv/bin/python /opt/interview/backend/scripts/cleanup.py
+
+# 以专用用户运行，最小权限
+User=interview
+Group=interview
+
+# 退出码 3 = "已有另一个实例在跑，本次跳过"。这**不是失败**，
+# 不该让 systemd 把它记成 failed（否则监控会持续误告警）。
+SuccessExitStatus=0 3
+
+# 清理是幂等的短任务；给一个宽松但有限的上限，防止卡死时一直占着
+TimeoutStartSec=120
+
+# --- 加固（均为只读/最小权限，不违反清理需要的能力） ---
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+# 需要写：数据库文件、其 -wal/-shm、以及同目录下的单实例锁文件
+ReadWritePaths=/opt/interview/backend
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+# 日志进 journal：journalctl -u cleanup.service
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
