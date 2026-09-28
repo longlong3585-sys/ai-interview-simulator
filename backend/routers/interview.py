@@ -8,7 +8,7 @@ from PyPDF2 import PdfReader
 from docx import Document
 from sqlalchemy.orm import Session
 
-from auth import get_db, get_current_admin_user, require_user
+from auth import get_db, get_current_user, get_current_admin_user, require_user
 from models.schemas import ChatRequest, ReportRequest, SaveInterviewRequest
 from utils.ai_helpers import client, extract_json_from_response, generate_questions, clean_resume_text
 from database import User, InterviewRecord
@@ -280,7 +280,16 @@ def save_interview(
 
 
 @router.post("/resume/upload")
-async def upload_resume(file: UploadFile = File(...)):
+async def upload_resume(
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user),
+):
+    # T-05 / FR-2.4（Bug 1）：此前该接口无任何鉴权依赖，未登录即可上传文件
+    # 触发 PDF/DOCX 解析，构成资源消耗攻击面。
+    #
+    # 依赖选型（见 02-architecture.md §4.2）：这里挂 `get_current_user` 而非
+    # `require_user` —— 后者会对 admin 返回 403（"管理员不能进行面试"），
+    # 而"上传简历"本身不应以角色为由拒绝，故只用登录态这一层。
     allowed_mime = ["application/pdf", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"]
     if file.content_type not in allowed_mime:
         raise HTTPException(status_code=400, detail="仅支持 PDF 或 DOCX 格式")

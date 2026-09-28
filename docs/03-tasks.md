@@ -26,6 +26,19 @@
 | T-02 | ✅ 已完成 | 2026-09-28 | 见 git log | 移除 `**/test_*.py` 忽略；忽略根目录 `*.docx`；建立 unittest 测试骨架 + **独立测试库隔离**（16 项测试全绿）。**偏差**：PyPI 不可达 → 以 stdlib `unittest` 运行（见 ADR-021R） |
 | T-03 | ✅ 已完成 | 2026-09-28 | 见 git log | Vitest+RTL 配置**待激活**（npm registry 不可达）；当前以零依赖 `node:test` 运行**契约测试 7 项全绿**（跳过词一致性 / API 路径对齐 / 匹配器判别力）。`tsc -b` 与 `vite build` 均 EXIT=0（测试文件置于 `src/` 外，不破坏构建） |
 | T-04 | ✅ 已完成 | 2026-09-28 | 见 git log | `/api/chat` 挂 `require_user` + 身份改用 `current_user.id`；`ChatRequest.user_id` 已移除。**9 项测试**（含伪造 user_id 无效）；**破坏性验证：移除鉴权后 8/9 失败**。真机验证：无 token→401、伪造 user_id→被忽略 |
+| T-05 | ✅ 已完成 | 2026-09-29 | 见 git log | `/api/resume/upload` 挂 `get_current_user`（**刻意不用 `require_user`**，否则 admin 会被 403）。**10 项测试**；**破坏性验证：移除鉴权后 3/10 失败**。真机验证：无 token→401、带 token+txt→400、DOCX→200、**admin→200**；OpenAPI schema 现已声明 security。顺带抽出 `tests/support.py` 消重 |
+
+> **⚠️ 操作教训（T-05 真机验证时踩到，务必记住）**
+> `job_kill` **只杀 pwsh 包装进程，不会杀 uvicorn 的 python 子进程**。残留进程会继续占着 8000 端口，导致：
+> ① 新起的服务 `[Errno 10048]` 绑定失败并退出；② **curl 打到旧进程（跑着修改前的代码）→ 得到看似成功实则错误的结论**。
+> T-05 首次真机验证就因此得到"无 token → 200"的**假结果**，靠"应为 401"的预期不符才发现。
+> **正确做法**：每次真机验证前，先确认端口监听者是新进程——
+> ```powershell
+> netstat -ano | Select-String ":8000\s+.*LISTENING"     # 拿到 PID
+> Get-Process -Id <PID> | Select-Object Id, StartTime    # 启动时间必须是刚才
+> ```
+> 并优先用 **OpenAPI schema 客观证据**（`/openapi.json` 里该接口是否有 `security`）代替纯黑盒判断。
+> 停服务时须显式 `Stop-Process` 掉 listener PID 与其 python 父/子进程。
 
 > **🔒 冻结范围**：`backend/database.py`、engine 配置、`SessionLocal`、`create_engine`/PRAGMA/连接池、建表语句、`services/stores/`、Alembic 迁移 —— 即 **阶段 2 全部**，以及**阶段 3 全部**（均依赖新存储）。
 > **解冻条件**：用户审批本清单 → 移除 🔒 → 按依赖顺序开工。
@@ -75,7 +88,7 @@
 | ID | 类别 | 任务 | 工时 | 依赖 | 标记 |
 |---|---|---|---|---|---|
 | T-04 | **修复 Bug** | `/api/chat` 挂 `require_user`，改用 `current_user.id`（不再读请求体） | 2h | T-02 | ✅ |
-| T-05 | **修复 Bug** | `/api/resume/upload` 挂 `get_current_user` | 1h | T-04 | ⬜ |
+| T-05 | **修复 Bug** | `/api/resume/upload` 挂 `get_current_user` | 1h | T-04 | ✅ |
 | T-06 | **修复 Bug** | `get_current_user` 增加 `is_active` 校验（FR-2.6） | 1h | T-02 | ⬜ |
 | T-07 | **修复 Bug** | `SECRET_KEY` 缺失即启动失败，移除硬编码回退（NFR-1c） | 1h | — | ⬜ |
 | T-08 | **修复 Bug** | 抽出 `validate_password()`，注册/改密共用同一规则（FR-1.1/1.5） | 3h | T-02 | ⬜ |

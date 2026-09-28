@@ -10,17 +10,19 @@ AI 调用一律被 mock，测试**不发真实网络请求**，保证确定性�
 """
 
 import unittest
-from datetime import timedelta
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
 import main  # noqa: E402  —— 环境隔离由 tests/__init__.py 保证
-from auth import create_access_token
-from database import SessionLocal, User
 from routers.interview import interview_sessions
+from tests.support import bearer, create_test_user, delete_users, mint_token
 
 QUESTIONS = ["Q1 项目经历？", "Q2 技术栈？", "Q3 难点？"]
+
+USER_A = "t04_alice"
+USER_B = "t04_bob"
+USER_ADMIN = "t04_admin"
 
 
 class _FakeMessage:
@@ -65,50 +67,18 @@ class ChatAuthTests(unittest.TestCase):
 
     def setUp(self):
         interview_sessions.clear()
-        db = SessionLocal()
-        try:
-            self.user_a = User(
-                username="t04_alice", hashed_password="x",
-                email="t04_alice@test.local", role="user", is_active=True,
-            )
-            self.user_b = User(
-                username="t04_bob", hashed_password="x",
-                email="t04_bob@test.local", role="user", is_active=True,
-            )
-            self.admin = User(
-                username="t04_admin", hashed_password="x",
-                email="t04_admin@test.local", role="admin", is_active=True,
-            )
-            db.add_all([self.user_a, self.user_b, self.admin])
-            db.commit()
-            for u in (self.user_a, self.user_b, self.admin):
-                db.refresh(u)
-            self.id_a, self.id_b = self.user_a.id, self.user_b.id
-            self.token_a = create_access_token(
-                {"sub": self.user_a.username, "role": "user"},
-                expires_delta=timedelta(minutes=30),
-            )
-            self.token_admin = create_access_token(
-                {"sub": self.admin.username, "role": "admin"},
-                expires_delta=timedelta(minutes=30),
-            )
-        finally:
-            db.close()
+        self.id_a = create_test_user(USER_A, role="user")
+        self.id_b = create_test_user(USER_B, role="user")
+        create_test_user(USER_ADMIN, role="admin")
+        self.token_a = mint_token(USER_A, role="user")
+        self.token_admin = mint_token(USER_ADMIN, role="admin")
 
     def tearDown(self):
         interview_sessions.clear()
-        db = SessionLocal()
-        try:
-            db.query(User).filter(
-                User.username.in_(["t04_alice", "t04_bob", "t04_admin"])
-            ).delete(synchronize_session=False)
-            db.commit()
-        finally:
-            db.close()
+        delete_users([USER_A, USER_B, USER_ADMIN])
 
     def _post_chat(self, body, token=None):
-        headers = {"Authorization": "Bearer %s" % token} if token else {}
-        return self.client.post("/api/chat", json=body, headers=headers)
+        return self.client.post("/api/chat", json=body, headers=bearer(token))
 
     # ---------- 1. 鉴权 ----------
 
@@ -122,18 +92,12 @@ class ChatAuthTests(unittest.TestCase):
         self.assertEqual(r.status_code, 401)
 
     def test_chat_with_expired_token_returns_401(self):
-        expired = create_access_token(
-            {"sub": self.user_a.username, "role": "user"},
-            expires_delta=timedelta(minutes=-5),
-        )
+        expired = mint_token(USER_A, role="user", minutes=-5)
         r = self._post_chat({"message": "你好"}, token=expired)
         self.assertEqual(r.status_code, 401)
 
     def test_chat_with_token_of_deleted_user_returns_401(self):
-        ghost = create_access_token(
-            {"sub": "t04_ghost_does_not_exist", "role": "user"},
-            expires_delta=timedelta(minutes=30),
-        )
+        ghost = mint_token("t04_ghost_does_not_exist", role="user")
         r = self._post_chat({"message": "你好"}, token=ghost)
         self.assertEqual(r.status_code, 401)
 
