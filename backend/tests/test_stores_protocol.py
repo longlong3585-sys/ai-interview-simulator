@@ -32,6 +32,7 @@ from services.stores.base import (  # noqa: E402
     CommitResult,
     EndedReason,
     RateLimitStore,
+    ReplayLookup,
     SessionDraft,
     SessionNotFound,
     SessionSnapshot,
@@ -308,16 +309,21 @@ class DataTypeTests(unittest.TestCase):
             snap.version = 99
 
     def test_snapshot_fields_match_interview_sessions_columns(self):
-        """快照字段必须与 T-17 的 `interview_sessions` 列一一对应。
+        """快照字段必须与 `interview_sessions` 的列一一对应。
 
         这是"协议"与"DDL"之间的**跨层一致性**断言：将来只改了一边，
         这里会立刻报错，而不是等到 T-19 运行时才发现。
         （T-17 的测试会从另一个方向核对同一组名字。）
+
+        注：`report` 是 T-19 补的 —— ADR-004 明确要求
+        `UPDATE interview_sessions SET report=:json ...`，但 §6.2 的建表语句
+        漏了该列；迁移 004 补上，两处才重新对齐。
         """
         expected = {
             "session_id", "user_id", "role", "questions", "question_status",
             "user_answers", "current_index", "last_seq", "last_reply", "version",
             "status", "created_at", "updated_at", "expires_at", "ended_reason",
+            "report",
         }
         actual = {f.name for f in fields(SessionSnapshot)}
         self.assertEqual(
@@ -359,6 +365,43 @@ class DataTypeTests(unittest.TestCase):
         err = ActiveSessionExists(user_id=7)
         self.assertEqual(err.user_id, 7)
         self.assertIn("7", str(err))
+
+
+class ReplayLookupTests(unittest.TestCase):
+    """T-19 补的协议修正：`find_replay` 的返回必须能区分两种「没有回复」。
+
+    T-16 首版把返回类型写成 `Optional[str]`，用 `None` 同时表示
+    "不是重发，要调 AI" 与 "是重发，但上次回复为空" —— 后者被误判会导致
+    **重复调用 AI、重复计费**，正是 ADR-023 幂等机制要消除的问题。
+    这个用例把"两种情形必须可区分"钉住。
+    """
+
+    def test_no_replay_and_empty_reply_are_distinguishable(self):
+        fresh = ReplayLookup(is_replay=False)
+        empty_replay = ReplayLookup(is_replay=True, reply=None)
+
+        self.assertFalse(fresh.is_replay)
+        self.assertTrue(empty_replay.is_replay)
+        self.assertIsNone(empty_replay.reply)
+        # 关键：两者都能表达出来，且不相等 —— 首版的 Optional[str] 做不到
+        self.assertNotEqual(fresh, empty_replay)
+
+    def test_replay_carries_reply(self):
+        look = ReplayLookup(is_replay=True, reply="上次的回复")
+        self.assertTrue(look.is_replay)
+        self.assertEqual(look.reply, "上次的回复")
+
+    def test_is_frozen(self):
+        look = ReplayLookup(is_replay=False)
+        with self.assertRaises(Exception):
+            look.is_replay = True
+
+    def test_find_replay_returns_optional_lookup(self):
+        """返回类型注解必须是 `Optional[ReplayLookup]`（None 表示会话不存在）。"""
+        import typing
+
+        hints = typing.get_type_hints(SessionStore.find_replay)
+        self.assertEqual(hints["return"], typing.Optional[ReplayLookup])
 
 
 class TimeContractTests(unittest.TestCase):
@@ -417,8 +460,8 @@ class PackageExportTests(unittest.TestCase):
     REEXPORTS = (
         "SessionStore", "CaptchaStore", "RateLimitStore", "SessionSnapshot",
         "SessionDraft", "CommitResult", "StoreError", "ActiveSessionExists",
-        "SessionNotFound", "SessionStatus", "EndedReason", "TERMINAL_STATUSES",
-        "utcnow_iso", "iso_after",
+        "SessionNotFound", "SessionStatus", "EndedReason", "ReplayLookup",
+        "TERMINAL_STATUSES", "utcnow_iso", "iso_after",
     )
 
     def test_reexports_are_identical_objects(self):

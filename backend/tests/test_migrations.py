@@ -61,7 +61,7 @@ NEW_TABLES = {
                            "question_status", "user_answers", "current_index",
                            "last_seq", "last_reply", "version", "status",
                            "created_at", "updated_at", "expires_at",
-                           "ended_reason"],
+                           "ended_reason", "report"],
     "captcha_store": ["captcha_id", "code", "expires_at", "used"],
     "auth_attempts": ["id", "ip", "attempted_at"],
     "token_blacklist": ["jti", "expires_at"],
@@ -618,6 +618,46 @@ class SafetyTests(unittest.TestCase):
         with self.assertRaises(MigrationError) as ctx:
             load_migrations(bad_dir)
         self.assertIn("重复", str(ctx.exception))
+
+
+class ProtocolSchemaAgreementTests(unittest.TestCase):
+    """协议 ↔ DDL 的**跨层一致性**（跑完整迁移链后比对）。
+
+    这是本项目最有价值的一条跨层断言：它把"图纸"（`SessionSnapshot` 协议）
+    与"实物"（`interview_sessions` 的列）钉在一起。只改一边会立刻失败，
+    而不是拖到运行时才暴露。
+
+    为什么放在这里而不是某个迁移的测试里：协议对应的是**最终**结构，
+    所以必须跑完整链条。放在 002 的测试里会在每次新增迁移时误报
+    —— T-19 加 004 时就是这样。
+    （反向断言在 `test_stores_protocol.py`：它用硬编码集合校验协议本身。）
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="t14-proto-")
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.db = os.path.join(self.tmp, "full.db")
+        run(self.db, backup=False, log=lambda *a, **k: None)
+
+    def test_session_snapshot_matches_final_ddl(self):
+        from dataclasses import fields
+
+        from services.stores.base import SessionSnapshot
+
+        ddl = set(_columns(self.db, "interview_sessions"))
+        protocol = {f.name for f in fields(SessionSnapshot)}
+        self.assertEqual(
+            ddl, protocol,
+            "interview_sessions 的列与 SessionSnapshot 字段不一致："
+            "只在 DDL=%s 只在协议=%s"
+            % (sorted(ddl - protocol), sorted(protocol - ddl)),
+        )
+
+    def test_full_chain_matches_expected_columns(self):
+        """`EXPECTED` 必须与实跑出来的**最终**结构完全一致。"""
+        for table, cols in EXPECTED.items():
+            self.assertEqual(_columns(self.db, table), cols,
+                             "表 %s 的最终列与 EXPECTED 不符" % table)
 
 
 if __name__ == "__main__":

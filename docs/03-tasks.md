@@ -22,6 +22,8 @@
 > **📌 解冻补充（2026-09-29，第三轮）**：用户验收 T-16 / T-17 通过，**解冻 T-18**（既有表结构变更），并明确要求：
 > ① 执行前再次核验 T-01 的单文件备份机制；② 必须按 ADR 要求用重建表实现；③ 完成后交付**针对真库的分步骤人工执行与校验指令（含回滚）**；④ **由用户亲手执行真库变更**。
 > **T-18 代码与测试已完成，真库尚未执行**（仍为 `001, 002`）。**T-19 起仍为 🔒 冻结**。
+> **📌 解冻补充（2026-09-29，第四轮）**：用户确认 T-18 真库迁移人工执行成功（`003`，14 项自检通过，`verify_t18.py` 26/26），**解冻 T-19** 并指出这是"迁移后第一个真业务代码接入，风险较高"，要求完成后交付人工验证指令。
+> **T-19 代码与测试已完成；实现中发现 T-16 协议两处硬伤并修正，另需迁移 004 补 `report` 列 —— 真库仍在 `003`，004 待用户执行**。**T-20 起仍为 🔒 冻结**。
 > **阶段顺序不调整**：T-44 路由化按原计划执行（用户认定它是根治 Bug 2/Bug 3 的前置）。
 > **开工规则（规则 7）**：每次只做一个任务 → 读任务 → 写代码 → 写测试 → 运行测试 → 修复 → 状态改 done → `git commit` → **暂停等"继续下一个任务"**。
 
@@ -46,7 +48,8 @@
 | T-15 | ✅ 已完成 | 2026-09-29 | `93ed0b3` + 补充提交 | engine 运行契约：WAL + `busy_timeout=15000` + `synchronous=NORMAL` + `foreign_keys=ON` + `BEGIN IMMEDIATE`。**13 项测试**；**破坏性验证：6 个探针全部被抓住**。⚠️ 实测修正 ADR-002 的一处不准确说法：仅 `create_engine(isolation_level=None)` **不够**，须在 connect 事件里设 `dbapi_conn.isolation_level=None`。⚠️ **补充提交**：第二轮探针发现 `PRAGMA busy_timeout` 一行在引擎路径上属"观测冗余"（`sqlite3.connect(timeout=15.0)` 自带同样效果），已补判别性用例 + 独立库测试。⚠️ 已知代价：全局 `BEGIN IMMEDIATE` 使**经由本引擎的并发事务串行化**（WAL 纯读不受影响），已写成用例显式记录。**交付物**：`scripts/verify_t15.py`（人工验收工具，29 项）+ `scripts/probes/`（2 个探针复现脚本）。见 ADR-002R |
 | T-16 | ✅ 已完成 | 2026-09-29 | `5893f78` | `services/stores/base.py`：**只有协议与数据类型，零实现**。3 个 `@runtime_checkable` Protocol（`SessionStore` 9 方法 / `CaptchaStore` 3 / `RateLimitStore` 4）+ 4 个 frozen dataclass + 类型化异常 + ISO 时间契约。**26 项测试**（依赖面只在标准库白名单内、禁止 SQL 泄露、方法名与**参数名**逐一断言、鸭子类型可 `isinstance`、frozen 不可变、ISO 字典序==时间序、`is_expired` 边界 `<=`）。**破坏性验证：9 个探针全部被抓住**。⚠️ 其中 2 个探针首轮是"模块导入失败"造成的**假阳性**，已改为精确命中目标断言（见提交说明）。**边界**：`token_blacklist` 表的协议**刻意不定义**，理由见下方注 |
 | T-17 | ✅ 已完成 | 2026-09-29 | 见 git log | `migrations/versions/002_sessions_and_stores.py`：4 张新表 + 5 个索引，**全部 `CREATE ... IF NOT EXISTS`**。`ended_reason` 直接写进 CREATE（架构 §4 的 ALTER 形式是"假设表已存在"，实际本表首次创建，结果结构一致）。**真库已实跑迁移成功**（`001` → `001, 002`，原始日志见 `docs/17-migration-log.md`）：既有数据零丢失（users=3 / records=5 不变）、`integrity_check=ok`、`foreign_key_check` 无违规。**25 项专项测试**（另有 `test_migrations.py` 由 15 → 18 项、`test_backup_tools.py` 由 9 → 14 项）。**破坏性验证：11 个探针全部被抓住**（其中 1 个首轮漏网：DDL 的 `DEFAULT 'active'` 从未被执行到 → 已补断言）。⚠️ 顺带发现并修复 3 个问题：迁移日志乱码、`journal_mode.py` 附属文件统计时序错误、**备份产物不是单文件**（见日志 §10） |
-| T-18 | ✅ 已完成（代码+测试）<br>⏸ **真库待人工执行** | 2026-09-29 | 见 git log | `migrations/versions/003_existing_tables.py`：`users` 原生 `ADD COLUMN`、`interview_records` **重建表**加 `client_token` + `UNIQUE`、`notifications` **重建表**删死列 `link_url`。⚠️ **真库尚未执行**（仍为 `001, 002`）—— 用户要求亲手按下这次结构变更的按钮。**为"重建表"新增三道框架闸**（`runner.py`）：**行数不得减少** / **声明式自检 14 项** / **`foreign_key_check` 必须为空**，全部在 COMMIT 前执行、失败即整体回滚。**23 项专项测试 + 12 项闸门测试**（`test_migrations.py` 亦由 18 → 23 项）。**破坏性验证：13 个探针全部被抓住**（含 3 个专打框架闸的探针；其中 1 个首轮"漏网"实为探针自身针位错误 → 已加"针必须唯一命中"校验）。**交付物**：`scripts/verify_t18.py`（只读验收 26 项 + `--facts`）、`scripts/probes/probe_t18_migration.py`、**`docs/18-manual-migration.md`（人工执行与回滚指令）** |
+| T-18 | ✅ 已完成 | 2026-09-29 | `b17c833` | `migrations/versions/003_existing_tables.py`：`users` 原生 `ADD COLUMN`、`interview_records` **重建表**加 `client_token` + `UNIQUE`、`notifications` **重建表**删死列 `link_url`。**真库已由用户人工执行成功**（`003`，14 项自检通过，`verify_t18.py` 26/26）。**为"重建表"新增三道框架闸**（`runner.py`）：行数不得减少 / 声明式自检 / `foreign_key_check` 必须为空，全部在 COMMIT 前执行、失败即整体回滚。**破坏性验证：13 个探针全部被抓住**（其中 1 个首轮"漏网"实为探针自身针位错误 → 已加"针必须唯一命中"校验）。**交付物**：`scripts/verify_t18.py`、`scripts/probes/probe_t18_migration.py`、`docs/18-manual-migration.md` |
+| T-19 | ✅ 已完成（代码+测试）<br>⏸ **真库待执行迁移 004** | 2026-09-29 | 见 git log | `services/stores/sqlite_store.py`：`SessionStore` 的 9 个方法实现（乐观锁 / `seq` 幂等 / 状态机 / 短事务）+ `services/stores/factory.py`（**唯一装配点**，带启动期协议自检）。⚠️ **实现时发现 T-16 已批准协议的两处硬伤**：① `find_replay` 返回 `Optional[str]` 用 `None` 兼表"非重发"与"重发但回复为空"→ **会重复计费**，已改为显式 `ReplayLookup`；② `finish()` 要写报告但 `interview_sessions` **没有 `report` 列**（ADR-004 与 §6.2 DDL 互相矛盾），已按 ADR-004 补迁移 **004**（纯加列）。⚠️ 有意偏离 T-10 约定：会话行 JSON 损坏**严格报错**而非容错回退（回退成 `[]` 会产出误导性 0 分报告）。**40 项专项测试 + 迁移 004 12 项**；**破坏性验证：15 个探针全部被抓住**。**交付物**：`scripts/verify_t19.py`（走查 29 项 + `--db` 前置结构检查 6 项）、`scripts/probes/probe_t19_store.py`、`docs/19-manual-verification.md`。⚠️ 真库仍在 `003`，**004 待用户执行** |
 
 > **⚠️ 操作教训（T-05 真机验证时踩到，务必记住）**
 > `job_kill` **只杀 pwsh 包装进程，不会杀 uvicorn 的 python 子进程**。残留进程会继续占着 8000 端口，导致：
@@ -100,17 +103,18 @@
 
 ---
 
-## 阶段 2 已完成情况（T-14 ~ T-18）
+## 阶段 2 已完成情况（T-14 ~ T-19）
 
 | 任务 | 提交 | 内容 |
 |---|---|---|
-| T-14 自建迁移 runner（ADR-009R 偏离审批） | `59b7758` | `migrations/runner.py` + `versions/001_baseline.py` + `scripts/migrate.py`；`schema_migrations` 表；五道安全闸。移除 `database.py` 的 `create_all()` + 手写 ALTER |
+| T-14 自建迁移 runner（ADR-009R 偏离审批） | `59b7758` | `migrations/runner.py` + `versions/001_baseline.py` + `scripts/migrate.py`；`schema_migrations` 表；五道安全闸 |
 | T-15 engine 运行契约 | `93ed0b3` + 补充提交 | WAL + `busy_timeout=15000` + `synchronous=NORMAL` + `foreign_keys=ON` + `BEGIN IMMEDIATE`；新增 ADR-002R |
-| T-16 存储抽象层协议 | `5893f78` | `services/stores/base.py`：3 个 `runtime_checkable` Protocol + 4 个 frozen dataclass + 类型化异常 + ISO 时间契约；零实现、零第三方依赖、零 SQL |
-| T-17 迁移 002：四张新表 | `74e965c` | `versions/002_sessions_and_stores.py`；**真库已实跑成功**（`001` → `001, 002`，日志 `docs/17-migration-log.md`） |
-| T-18 迁移 003：既有表变更 | 见 git log | `versions/003_existing_tables.py`；**首次改动既有表**（加列 / 重建表 / 删列）；框架新增三道安全闸（行数不减 / 声明式自检 / 外键完整）。⏸ **真库待人工执行**，指令见 `docs/18-manual-migration.md` |
+| T-16 存储抽象层协议 | `5893f78` | `services/stores/base.py`：3 个 `runtime_checkable` Protocol + 4 个 frozen dataclass + 类型化异常 + ISO 时间契约 |
+| T-17 迁移 002：四张新表 | `74e965c` | `versions/002_sessions_and_stores.py`；真库已实跑（`001` → `001, 002`） |
+| T-18 迁移 003：既有表变更 | `b17c833` | `versions/003_existing_tables.py`；首次改动既有表（加列 / 重建表 / 删列）；框架新增三道安全闸。真库已由用户人工执行成功 |
+| T-19 会话存储实现 | 见 git log | `services/stores/sqlite_store.py` + `factory.py` + 迁移 `004`（补 `report` 列）；修正 T-16 协议两处硬伤。**真库 004 待执行** |
 
-**测试规模**：后端 **247 项**（阶段 1 结束时 114，阶段 2 已 +133）＋ 前端 **13 项**，全部通过。
+**测试规模**：后端 **305 项**（阶段 1 结束时 114，阶段 2 已 +191）＋ 前端 **13 项**，全部通过。
 **本批偏差/事故均已记录**：T-14 的 `--dry-run` 曾在真库创建空表（已清理并加固为纯只读）；T-15 修正了 ADR-002 关于 `isolation_level` 的不准确说法，并在第二轮探针中补齐 `busy_timeout` 的判别力缺口（见 ADR-002R）。
 
 **T-15 交付物**
@@ -132,7 +136,7 @@
    │
    ├──▶ 阶段1 后端安全止血 (T-04~13)  ← 不碰数据库，可立即开工
    │
-   └──▶ 阶段2 存储层重构 (T-14~22)   ← T-14~T-18 已完成（T-18 真库待人工执行）；T-19 起仍冻结
+   └──▶ 阶段2 存储层重构 (T-14~22)   ← T-14~T-19 已完成（真库 004 待执行）；T-20 起仍冻结
              │
              └──▶ 阶段3 Bug修复 🔒 (T-23~33)   ← 依赖新存储
                        │
@@ -201,7 +205,7 @@
 | T-16 | **存储重构** | `services/stores/` 抽象层协议（`SessionStore`/`CaptchaStore`/`RateLimitStore`） | 2h | T-15 | ✅ |
 | T-17 | **存储重构** | 迁移：新增 4 张表（`interview_sessions`/`captcha_store`/`auth_attempts`/`token_blacklist`） | 3h | T-16 | ✅ |
 | T-18 | **存储重构** | 迁移：既有表变更（`client_token` / `must_change_password` / 删死列 `link_url`） | 3h | T-17 | ✅ |
-| T-19 | **存储重构** | `SQLiteSessionStore`：乐观锁 `version` + `seq` 幂等 + 状态机 + 短事务 | 4h | T-18 | 🔒 |
+| T-19 | **存储重构** | `SQLiteSessionStore`：乐观锁 `version` + `seq` 幂等 + 状态机 + 短事务 | 4h | T-18 | ✅ |
 | T-20 | **存储重构** | `SQLiteCaptchaStore`（TTL 300s，一次性） | 2h | T-18 | 🔒 |
 | T-21 | **存储重构** | `SQLiteRateLimitStore`（**仅失败计数** + 滑动窗口 10min/5 次） | 2h | T-18 | 🔒 |
 | T-22 | **存储重构** | 清理任务 `scripts/cleanup.py` + `cleanup.timer`（单实例，非 APScheduler） | 3h | T-19,T-20,T-21 | 🔒 |
@@ -225,6 +229,11 @@
   **真库执行**：⏸ **待用户人工执行**，步骤与回滚见 `docs/18-manual-migration.md`。
   **配套框架改动（安全闸 6/7/8）**：`ALLOWS_DATA_LOSS` / `VERIFY_STATEMENTS` / `ALLOWS_TABLE_REBUILD` + `REBUILD_REASON` 三项可选声明；不声明即走最严默认值。静态闸门同步收紧：`DROP` 只在显式声明重建**且**给出理由的迁移里允许，且只允许 `DROP TABLE <表名>` 一种形态。
 - T-19：**并发测试**：两请求同 `version` 并发 → 一个成功、一个 **409**（不静默覆盖）；同 `seq` 重发 → 返回缓存 `last_reply` **且不重复调用 AI**
+  **实际验收**：`scripts/verify_t19.py` 走查 29/29（含"陈旧 version 被拒且库内容未被覆盖"、"空回复的重发仍判为重发"、"每个方法之后独立连接都能取到写锁"）；专项测试 40 项；**破坏性验证 15 个探针全部被抓住**。
+  **框架/协议修正**：① `find_replay` 的 `Optional[str]` 歧义 → `ReplayLookup`（否则空回复重发会被当成新请求，**重复调用 AI**）；② `finish(report_json)` 需要 `interview_sessions.report` 列，而 ADR-004 与 §6.2 DDL 矛盾 → 以 ADR-004 为准，迁移 004 纯加列补上。
+  ⚠️ **真库仍在 `003`**：存储层的每个方法都 `SELECT ... report ...`，**004 未执行前无法在真库上工作**（当前无接口调用它，线上不受影响）。执行指令见 `docs/19-manual-verification.md` §4。
+  📌 **一处有意偏离既有约定**：T-10 定下"读 JSON 文本列一律走 `safe_json_loads()`（容错回退）"；存储层**不遵守** —— 会话行损坏必须当场报错，否则回退成 `[]` 会让评分看到"0 题 0 答"，产出**看起来正常实则错误**的报告（ADR-007R 要消除的误导性 0 分）。
+  📌 **装配点唯一**：业务代码只能从 `services/stores/factory.py` 拿协议对象，不得直接 import 实现；装配期用 `isinstance(store, SessionStore)` 做启动自检（`@runtime_checkable` 在此真正发挥作用）。
 - T-20：验证码 300s 后失效；同一验证码**只能用一次**；多 worker 下均可用
 - T-21：成功登录**不写**该表；第 5 次失败触发拒绝；10 分钟窗口过期后恢复
 - T-22：定时任务**只运行一个实例**；过期会话被置 `abandoned`；过期验证码/限流记录被清除

@@ -28,6 +28,7 @@ from dataclasses import fields  # noqa: E402
 
 from migrations.runner import load_migrations, run  # noqa: E402
 from services.stores.base import SessionSnapshot  # noqa: E402
+from tests.support import versions_dir_up_to  # noqa: E402
 
 VERSIONS_DIR = os.path.join(BACKEND_DIR, "migrations", "versions")
 MIG_002 = os.path.join(VERSIONS_DIR, "002_sessions_and_stores.py")
@@ -123,11 +124,18 @@ class Migration002MetadataTests(unittest.TestCase):
 
 
 class SchemaShapeTests(unittest.TestCase):
+    """只跑到 002：断言的是**002 建出来的形状**。
+
+    刻意用 `versions_dir_up_to("002")` 而不是完整链条 —— 后续迁移（003/004）
+    会合法地改动既有表，跑完整链会让本组用例把"后续版本的既定改动"
+    误判成"002 建错了"。
+    """
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="t17-shape-")
         self.db = os.path.join(self.tmp, "fresh.db")
-        run(self.db, backup=False, log=noop)
+        run(self.db, backup=False, log=noop,
+            versions_dir=versions_dir_up_to("002", self.tmp))
 
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
@@ -152,27 +160,19 @@ class SchemaShapeTests(unittest.TestCase):
         finally:
             conn.close()
 
-    def test_session_columns_match_protocol_snapshot(self):
-        """跨层一致性：DDL 的列 ↔ T-16 的 `SessionSnapshot` 字段。
+    def test_session_columns_are_002_scope(self):
+        """本用例只断言 002 建出来的列。
 
-        这是本任务最有价值的一条断言 —— 它把"图纸"（协议）与"实物"（DDL）
-        钉在一起。将来若只改了一边（例如给表加列却忘了加进快照，
-        或反之），这里会立刻失败，而不是拖到 T-19 运行时才发现。
+        「协议 ↔ DDL 一一对应」那条**跨层断言**已移到 `test_migrations.py`
+        （跑完整链条再比对）—— 因为协议对应的是**最终**结构，
+        而本文件刻意只跑到 002。放在这里会在每次新增迁移时误报。
         """
         conn = connect(self.db)
         try:
-            ddl_columns = set(column_names(conn, "interview_sessions"))
+            self.assertEqual(column_names(conn, "interview_sessions"),
+                             EXPECTED_COLUMNS["interview_sessions"])
         finally:
             conn.close()
-        protocol_fields = {f.name for f in fields(SessionSnapshot)}
-
-        self.assertEqual(
-            ddl_columns, protocol_fields,
-            "interview_sessions 的列与 SessionSnapshot 字段不一致："
-            "只在 DDL=%s 只在协议=%s"
-            % (sorted(ddl_columns - protocol_fields),
-               sorted(protocol_fields - ddl_columns)),
-        )
 
     def test_all_indexes_created(self):
         conn = connect(self.db)

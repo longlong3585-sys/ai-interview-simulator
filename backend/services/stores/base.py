@@ -153,6 +153,28 @@ class ActiveSessionExists(StoreError):
 
 
 @dataclass(frozen=True)
+class ReplayLookup(object):
+    """`seq` 幂等前置去重的结果（ADR-004 第 0 步）。
+
+    ⚠️ **这是 T-19 实施时补上的协议修正。** T-16 首版把 `find_replay` 的返回
+    类型写成 `Optional[str]`，用 `None` 同时表示两件事：
+
+        * "这不是重发，请继续正常流程"（要调 AI）
+        * "这是重发，但上次的回复恰好是空的"（**不要**调 AI）
+
+    两者在 `None` 上撞车。若调用方把后者当成前者，就会**重复调用 AI 并重复计费**
+    —— 而这恰恰是 ADR-023 幂等机制要消除的头号问题。
+    一个"看不出来"的歧义，代价是真实账单，因此改成显式的结构体。
+    """
+
+    #: True = 客户端在重发（`seq <= last_seq`），调用方应直接返回 `reply`，
+    #: **不调用 AI、不推进索引**。
+    is_replay: bool
+    #: 仅当 `is_replay=True` 时有意义；允许为 `None`（上次回复正文为空）。
+    reply: Optional[str] = None
+
+
+@dataclass(frozen=True)
 class SessionSnapshot(object):
     """一次会话的完整快照（只读）。
 
@@ -178,6 +200,15 @@ class SessionSnapshot(object):
     last_reply: Optional[str] = None
     #: `completed` / `timeout` / `manual`；仅终态有值（ADR-007R）。
     ended_reason: Optional[str] = None
+    #: 评分报告（JSON 文本）。由 `finish()` 与置终态**同一短事务**写入
+    #: （ADR-004 报告路径："报告落库与置 finished 同事务"）。
+    #:
+    #: ⚠️ **T-19 补加**：ADR-004 明确写的是
+    #: `UPDATE interview_sessions SET report=:json, status='finished', ...`，
+    #: 但 §6.2 的建表语句里**没有 report 列** —— ADR 与 DDL 互相矛盾。
+    #: T-16 的协议又已经声明了 `finish(..., report_json, ...)`，两处对不上。
+    #: 经确认以 ADR-004 为准，由迁移 004 补上该列。
+    report: Optional[str] = None
 
     @property
     def total_questions(self) -> int:
@@ -294,13 +325,21 @@ class SessionStore(Protocol):
         """
         ...
 
-    def find_replay(self, session_id: str, seq: int) -> Optional[str]:
+    def find_replay(self, session_id: str, seq: int) -> Optional[ReplayLookup]:
         """`seq` 幂等前置去重（ADR-004 第 0 步）。
 
-        若 `seq <= last_seq`，说明客户端在重发，返回上次的 `last_reply`
-        （可能是 `None`），调用方据此**直接响应、不调用 AI、不推进索引** ——
-        这是"避免重复计费"的唯一关卡。
-        否则返回 `None`，表示这是一个新序号，应继续正常流程。
+        返回
+        ----
+        `None`
+            会话不存在。调用方应返回 404 / 409，**不要**继续往下走。
+        `ReplayLookup(is_replay=False)`
+            这是一个新序号，继续正常流程（取快照 → 事务外调 AI → 短事务写入）。
+        `ReplayLookup(is_replay=True, reply=...)`
+            客户端在重发（`seq <= last_seq`）。调用方据此**直接响应、
+            不调用 AI、不推进索引** —— 这是"避免重复计费"的唯一关卡。
+
+        注意返回的是**结构体而不是裸 `str`**：见 `ReplayLookup` 的说明，
+        用 `None` 兼表两义会导致重复计费。
         """
         ...
 

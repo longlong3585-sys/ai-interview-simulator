@@ -22,6 +22,7 @@ if BACKEND_DIR not in sys.path:
     sys.path.insert(0, BACKEND_DIR)
 
 from migrations.runner import load_migrations, run  # noqa: E402
+from tests.support import versions_dir_up_to  # noqa: E402
 
 VERSIONS_DIR = os.path.join(BACKEND_DIR, "migrations", "versions")
 MIG_003 = os.path.join(VERSIONS_DIR, "003_existing_tables.py")
@@ -164,7 +165,8 @@ class Migration003EffectTests(unittest.TestCase):
         finally:
             conn.close()
 
-        run(self.db, backup=False, log=noop)
+        run(self.db, backup=False, log=noop,
+            versions_dir=versions_dir_up_to("003", self.tmp))
         self.conn = connect(self.db)
 
     def tearDown(self):
@@ -294,16 +296,24 @@ class Migration003EffectTests(unittest.TestCase):
     # ---------- 迁移语义 ----------
 
     def test_is_idempotent(self):
-        applied = run(self.db, backup=False, log=noop)
+        applied = run(self.db, backup=False, log=noop,
+                      versions_dir=versions_dir_up_to("003", self.tmp))
         self.assertEqual(applied, 0, "003 已应用，重复运行不应再做任何事")
 
     def test_002_tables_untouched(self):
+        """003 不该动 002 建的四张表（只跑到 003，避免 004 的列干扰判断）。"""
         names = {r[0] for r in self.conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table'")}
         for t in ("interview_sessions", "captcha_store", "auth_attempts",
                   "token_blacklist"):
             self.assertIn(t, names, "003 不该动 002 建的表，但 %s 不见了" % t)
-        self.assertEqual(columns(self.conn, "interview_sessions")[-1], "ended_reason")
+        self.assertEqual(
+            columns(self.conn, "interview_sessions"),
+            ["session_id", "user_id", "role", "questions", "question_status",
+             "user_answers", "current_index", "last_seq", "last_reply", "version",
+             "status", "created_at", "updated_at", "expires_at", "ended_reason"],
+            "003 不该改动 interview_sessions 的列（补 report 是 004 的工作）",
+        )
 
     def test_declared_verifications_all_pass(self):
         """把 003 自己声明的自检 SQL 在迁移后的库上再跑一遍。
