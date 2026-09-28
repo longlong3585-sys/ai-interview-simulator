@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { API_BASE_URL } from './config';
 import { authFetch } from './services/api';
+import { checkPasswordRules, passwordError } from './utils/passwordRules';
 
 function AdminPanelContent({ token }: { token: string | null }) {
   if (!token) return <div className="p-4 text-center text-gray-500">请先登录</div>;
@@ -913,17 +914,9 @@ function App() {
         return;
       }
       const pwd = password;
-      const lenOk = pwd.length >= 8 && pwd.length <= 16;
-      const hasLetter = /[A-Za-z]/.test(pwd);
-      const hasDigit = /\d/.test(pwd);
-      const hasSymbol = /[!@#$%^&*()_+\-=[\]{};':"\\|,.<>/?]/.test(pwd);
-      const kindOk = [hasLetter, hasDigit, hasSymbol].filter(Boolean).length >= 2;
-      const repeatOk = !/(.)\1{5,}/.test(pwd) &&
-                        !/012345|123456|234567|345678|456789|567890/.test(pwd) &&
-                        !/abcdef|bcdefg|cdefgh|defghi|efghij|fghijk/.test(pwd);
-      if (!lenOk) { setAuthError('密码长度应为8-16位'); return; }
-      if (!kindOk) { setAuthError('密码必须包含字母、数字、符号中至少2种'); return; }
-      if (!repeatOk) { setAuthError('请勿输入连续、重复位以上字母或数字'); return; }
+      // T-08：规则统一来自 src/utils/passwordRules.ts（与后端 validate_password 一致）
+      const pwdError = passwordError(pwd);
+      if (pwdError) { setAuthError(pwdError); return; }
       if (password !== confirmPassword) { setAuthError('两次输入的密码不一致'); return; }
       if (!agreeTerms) { setAuthError('请先阅读并同意用户协议'); return; }
     }
@@ -1170,8 +1163,11 @@ function App() {
       setPasswordChangeMsg('请输入新密码');
       return;
     }
-    if (newPassword.length < 6) {
-      setPasswordChangeMsg('新密码长度至少6位');
+    // T-08 / FR-1.5：改为与注册**同一套**规则（原先只要求 ≥6 位，
+    // 导致用户输入 6-7 位时前端放行、后端拒绝）
+    const pwdError = passwordError(newPassword);
+    if (pwdError) {
+      setPasswordChangeMsg(pwdError);
       return;
     }
     if (newPassword !== confirmNewPassword) {
@@ -2193,20 +2189,11 @@ function App() {
                 const pwd = e.target.value;
                 setPassword(pwd);
                 if (authMode === 'register') {
-                  const lenOk = pwd.length >= 8 && pwd.length <= 16;
-                  const hasLetter = /[A-Za-z]/.test(pwd);
-                  const hasDigit = /\d/.test(pwd);
-                  const hasSymbol = /[!@#$%^&*()_+\-=[\]{};':"\\|,.<>/?]/.test(pwd);
-                  const kindOk = [hasLetter, hasDigit, hasSymbol].filter(Boolean).length >= 2;
-                  const repeatOk = !/(.)\1{5,}/.test(pwd) &&
-                                    !/012345|123456|234567|345678|456789|567890/.test(pwd) &&
-                                    !/abcdef|bcdefg|cdefgh|defghi|efghij|fghijk/.test(pwd);
-                  setPasswordRules({ length: lenOk, kind: kindOk, noRepeat: repeatOk });
+                  // T-08：规则统一来自 src/utils/passwordRules.ts
+                  const checks = checkPasswordRules(pwd);
+                  setPasswordRules(checks);
                   if (pwd.length > 0) {
-                    if (!lenOk) setPasswordError('密码长度应为8-16位');
-                    else if (!kindOk) setPasswordError('密码必须包含字母、数字、符号中至少2种');
-                    else if (!repeatOk) setPasswordError('请勿输入连续、重复位以上字母或数字');
-                    else setPasswordError('');
+                    setPasswordError(passwordError(pwd) ?? '');
                   } else setPasswordError('');
                 }
               }}

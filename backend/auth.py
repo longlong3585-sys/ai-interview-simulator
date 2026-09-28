@@ -1,6 +1,7 @@
 import bcrypt
 import io
 import random
+import re
 import time
 import uuid
 from datetime import datetime, timedelta
@@ -81,6 +82,58 @@ def clear_ip_record(client_ip: str):
 
 def get_password_hash(password: str) -> str:
     return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+
+
+# ---------------------------------------------------------------------------
+# T-08 / FR-1.1 + FR-1.5：密码强度校验的**单一来源**
+#
+# 修复前的问题：
+#   - 注册（auth_router.py）**完全不做密码强度校验**，只判空 ——
+#     绕过前端直接构造请求即可注册弱密码（前端规则形同装饰）
+#   - 改密（user.py）与管理员重置（admin.py）各自写 `len < 8`，
+#     与注册口径不一致，且前端改密写的是 `>= 6` → 用户输 6-7 位时
+#     前端放行、后端报错
+#
+# 现在三处统一调用本函数；规则取自前端注册页（口径最完整的一套）：
+#   1) 长度 8-16
+#   2) 字母/数字/符号 至少 2 类
+#   3) 不含 6 位以上连续重复字符（如 aaaaaa）
+#   4) 不含 6 位升序序列（如 123456、abcdef）
+# ---------------------------------------------------------------------------
+
+PASSWORD_MIN_LENGTH = 8
+PASSWORD_MAX_LENGTH = 16
+
+_PWD_HAS_LETTER = re.compile(r"[A-Za-z]")
+_PWD_HAS_DIGIT = re.compile(r"\d")
+_PWD_HAS_SYMBOL = re.compile(r"""[!@#$%^&*()_+\-=\[\]{};':"\\|,.<>/?]""")
+_PWD_SIX_REPEAT = re.compile(r"(.)\1{5,}")
+_PWD_ASCENDING_RUN = re.compile(
+    r"012345|123456|234567|345678|456789|567890"
+    r"|abcdef|bcdefg|cdefgh|defghi|efghij|fghijk"
+)
+
+
+def validate_password(password: str) -> Optional[str]:
+    """校验密码强度。
+
+    返回 None 表示通过；否则返回**可直接展示给用户**的中文错误信息。
+    调用方统一以 HTTP 400 + 该信息响应。
+    """
+    if not password:
+        return "密码不能为空"
+    if not (PASSWORD_MIN_LENGTH <= len(password) <= PASSWORD_MAX_LENGTH):
+        return "密码长度应为%d-%d位" % (PASSWORD_MIN_LENGTH, PASSWORD_MAX_LENGTH)
+
+    kinds = sum(
+        bool(p.search(password))
+        for p in (_PWD_HAS_LETTER, _PWD_HAS_DIGIT, _PWD_HAS_SYMBOL)
+    )
+    if kinds < 2:
+        return "密码必须包含字母、数字、符号中至少2种"
+    if _PWD_SIX_REPEAT.search(password) or _PWD_ASCENDING_RUN.search(password):
+        return "请勿输入连续、重复6位以上字母或数字"
+    return None
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:

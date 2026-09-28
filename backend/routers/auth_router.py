@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 from auth import (
     get_db, verify_captcha, check_ip_lock, record_ip_failure,
     clear_ip_record, get_password_hash, authenticate_user,
-    migrate_password_if_needed, create_access_token
+    migrate_password_if_needed, create_access_token, validate_password
 )
 from config import ACCESS_TOKEN_EXPIRE_MINUTES
 
@@ -43,6 +43,14 @@ async def register(request: Request, db: Session = Depends(get_db)):
 
     if not username or not password:
         raise HTTPException(status_code=400, detail="用户名和密码不能为空")
+
+    # T-08 / FR-1.1：密码强度必须由**后端**强制。
+    # 修复前此处只判空，绕过前端直接构造请求即可注册任意弱密码。
+    # 校验放在验证码之后，以免削弱验证码这道防机器人闸门。
+    password_error = validate_password(password)
+    if password_error:
+        raise HTTPException(status_code=400, detail=password_error)
+
     username_pattern = re.compile(r'^[\u4e00-\u9fa5a-zA-Z0-9_]{3,16}$')
     if not username_pattern.match(username):
         raise HTTPException(status_code=400, detail="用户名必须为3-16位字母、数字、下划线或中文")

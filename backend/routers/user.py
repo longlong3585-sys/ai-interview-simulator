@@ -7,7 +7,7 @@ from datetime import timedelta
 from fastapi import APIRouter, Depends, HTTPException, Form, UploadFile, File
 from sqlalchemy.orm import Session
 
-from auth import get_db, get_current_user, require_user, verify_password, get_password_hash
+from auth import get_db, get_current_user, require_user, verify_password, get_password_hash, validate_password
 from models.schemas import ProfileUpdate
 from database import User, InterviewRecord, Notification
 
@@ -97,8 +97,10 @@ def change_password(
 ):
     if not verify_password(old_password, current_user.hashed_password):
         raise HTTPException(status_code=400, detail="原密码错误")
-    if len(new_password) < 8:
-        raise HTTPException(status_code=400, detail="新密码长度至少8位")
+    # T-08 / FR-1.5：与注册使用**同一个**校验函数，杜绝"前端 ≥6 / 后端 ≥8"的口径冲突
+    password_error = validate_password(new_password)
+    if password_error:
+        raise HTTPException(status_code=400, detail=password_error)
     current_user.hashed_password = get_password_hash(new_password)
     db.commit()
     return {"msg": "密码修改成功"}

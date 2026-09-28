@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Form
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 
-from auth import get_db, get_current_admin_user, get_password_hash
+from auth import get_db, get_current_admin_user, get_password_hash, validate_password
 from models.schemas import InterviewUpdateRequest
 from database import User, InterviewRecord, Notification
 
@@ -132,8 +132,10 @@ def admin_reset_password(
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="用户不存在")
-    if len(new_password) < 8:
-        raise HTTPException(status_code=400, detail="新密码长度至少8位")
+    # T-08 / FR-1.5：与注册、改密使用**同一个**校验函数
+    password_error = validate_password(new_password)
+    if password_error:
+        raise HTTPException(status_code=400, detail=password_error)
     user.hashed_password = get_password_hash(new_password)
     db.commit()
     return {"msg": "密码重置成功"}
