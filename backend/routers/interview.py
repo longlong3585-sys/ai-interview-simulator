@@ -368,6 +368,92 @@ async def skip_question(current_user: User = Depends(require_user)):
             "finished": False, "current_index": idx}
 
 
+def _session_payload(snapshot: SessionSnapshot) -> dict:
+    """把快照转成前端可用的会话摘要（T-24）。
+
+    刻意**不返回** `report`（可能很大，且是评分结果，不该在"读进度"时下发）；
+    也不返回 `user_id` —— 会话归属由令牌决定，下发它只会造成"可指定他人"的误导。
+    """
+    import datetime
+    remaining = None
+    try:
+        exp = datetime.datetime.fromisoformat(snapshot.expires_at)
+        remaining = max(0, int((exp - datetime.datetime.utcnow()).total_seconds()))
+    except (ValueError, TypeError):
+        pass
+    return {
+        "session_id": snapshot.session_id,
+        "role": snapshot.role,
+        "questions": snapshot.questions,
+        "question_status": snapshot.question_status,
+        "user_answers": snapshot.user_answers,
+        "current_index": snapshot.current_index,
+        "last_seq": snapshot.last_seq,
+        "total": len(snapshot.questions),
+        "status": snapshot.status,
+        "version": snapshot.version,
+        "created_at": snapshot.created_at,
+        "expires_at": snapshot.expires_at,
+        "remaining_seconds": remaining,
+    }
+
+
+@router.get("/interview/session")
+def get_interview_session(current_user: User = Depends(require_user)):
+    """T-24 / Bug 2：返回**当前活跃会话**；没有则 `session: null`。
+
+    为什么必须有这个接口：单靠"把会话落库"并不能修好"刷新即报废" ——
+    前端刷新后手里没有任何会话标识，必须有一个"问服务端我现在有没有在面试"
+    的入口。架构 v2.1 终审的结论：**仅持久化不足以修复，
+    必须配合会话读取接口**（ADR-022 把它列为 Bug 2 的必需组成部分）。
+
+    **无会话时返回 200 + null，而不是 404/409** —— 这是正常的业务状态
+    （用户就是没在面试），不是错误。前端据此决定显示"开始面试"还是
+    "继续上次面试"。
+    """
+    snapshot = _active_session(current_user.id)
+    return {"session": _session_payload(snapshot) if snapshot else None}
+
+
+@router.post("/interview/abandon")
+def abandon_interview_session(current_user: User = Depends(require_user)):
+    """T-24 / ADR-022R：把当前活跃会话置为 `abandoned`（**释放唯一锁**）。
+
+    这是"用户永远能开新面试"的兜底出口：浏览器崩溃 / 换设备 / 断网后用户
+    回不来，若没有这个接口就得等 2 小时 TTL 才能重开 —— ADR-022 明确要求
+    提供它，否则等于把用户锁在门外。
+
+    语义要点：
+      * 置 `abandoned` 而**不是删除** —— 会话内容要留给后续的历史/报告；
+      * `ended_reason=manual`（与超时的 `timeout` 区分开）；
+      * 没有活跃会话时返回 **409 + 指引**（与 T-23 的口径一致）；
+      * 乐观锁冲突时**重试一次**：用户点"放弃"的意图很明确，不该因为并发
+        被无声拒绝（重试是安全的 —— 载荷只有"置终态"，不含任何可能陈旧的内容）。
+    """
+    snapshot = _active_session(current_user.id)
+    if snapshot is None:
+        return _no_session_response()
+
+    store = get_session_store()
+    result = store.abandon(snapshot.session_id, snapshot.version,
+                           EndedReason.MANUAL, utcnow_iso())
+    if not result.applied:
+        latest = store.get(snapshot.session_id)
+        if latest is not None and latest.is_active:
+            result = store.abandon(latest.session_id, latest.version,
+                                   EndedReason.MANUAL, utcnow_iso())
+        if not result.applied:
+            return _version_conflict_response(latest or snapshot)
+
+    return {
+        "success": True,
+        "abandoned_session_id": snapshot.session_id,
+        "status": "abandoned",
+        "ended_reason": "manual",
+        "hint": "已放弃这场面试，你现在可以重新开始一场新的面试。",
+    }
+
+
 @router.post("/generate_report")
 async def generate_report(req: ReportRequest, current_user: User = Depends(require_user)):
     transcript = "\n".join([f"{m['role']}: {m['content']}" for m in req.messages])
