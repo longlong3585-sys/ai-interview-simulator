@@ -5,11 +5,12 @@
  * 消息红点上，`openHistory()` 又要被面试流程（报告保存成功后）调用 ——
  * 状态留在 App 会让 App 重新变胖，留在 UI 组件里又拿不到这两处引用。
  *
- * 注意 `historyListRef` 是**已知死代码**（声明后从未绑定到任何 DOM 节点），
- * 本次拆分不处置它，原样保留 —— 清理属于 T-48。
+ * T-48：原先这里还有一个 `historyListRef`（`useRef` 声明 + 绑到 `<ul ref=…>`，
+ * 但**从未被读过** —— 高亮滚动走的是 `document.getElementById('record-…')`）。
+ * 只写不读的 ref 已删除，`<ul>` 也不再挂 ref。
  */
 
-import { useEffect, useRef, useState, type RefObject } from 'react';
+import { useEffect, useState } from 'react';
 import { API_BASE_URL } from '../config';
 
 export interface NotificationCenterApi {
@@ -19,7 +20,6 @@ export interface NotificationCenterApi {
   expandedHistoryId: number | null;
   setExpandedHistoryId: (id: number | null) => void;
   highlightId: number | null;
-  historyListRef: RefObject<HTMLUListElement | null>;
   showInfoPanel: boolean;
   setShowInfoPanel: (open: boolean) => void;
   infoTab: 'notifications' | 'history';
@@ -45,7 +45,6 @@ export function useNotificationCenter({ token, userRole }: UseNotificationCenter
   const [unreadCount, setUnreadCount] = useState(0);
   const [expandedHistoryId, setExpandedHistoryId] = useState<number | null>(null);
   const [highlightId, setHighlightId] = useState<number | null>(null);
-  const historyListRef = useRef<HTMLUListElement>(null);
   const [showInfoPanel, setShowInfoPanel] = useState(false);
   const [infoTab, setInfoTab] = useState<'notifications' | 'history'>('notifications');
 
@@ -250,7 +249,7 @@ export function useNotificationCenter({ token, userRole }: UseNotificationCenter
 
   return {
     history, notifications, unreadCount,
-    expandedHistoryId, setExpandedHistoryId, highlightId, historyListRef,
+    expandedHistoryId, setExpandedHistoryId, highlightId,
     showInfoPanel, setShowInfoPanel, infoTab, setInfoTab,
     markAllRead, deleteNotification, clearAllNotifications, handleNotificationClick,
     openHistory, clear,

@@ -7,6 +7,8 @@
  * 持久化与登出清理不在这里（T-44 的边界，不许回退）。
  * 登录成功后 App 级的数据加载由 `onSignedIn` 回调转交（历史 / 通知 / 资料各自
  * 监听 token 变化，因此这里不再逐个调用 loadXxx）。
+ *
+ * T-48：删掉了只写不读的 `_passwordError` 状态（连同它的 3 处写入）。
  */
 
 import { useEffect, useState } from 'react';
@@ -27,7 +29,6 @@ export function AuthModal({ open, onClose, onSignedIn }: AuthModalProps) {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
-  const [_passwordError, setPasswordError] = useState('');
   const [authError, setAuthError] = useState('');
   const [emailError, setEmailError] = useState('');
   const [email, setEmail] = useState('');
@@ -184,11 +185,9 @@ export function AuthModal({ open, onClose, onSignedIn }: AuthModalProps) {
             setPassword(pwd);
             if (authMode === 'register') {
               // T-08：规则统一来自 src/utils/passwordRules.ts
-              const checks = checkPasswordRules(pwd);
-              setPasswordRules(checks);
-              if (pwd.length > 0) {
-                setPasswordError(passwordError(pwd) ?? '');
-              } else setPasswordError('');
+              // T-48：原先这里还往一个只写不读的 `_passwordError` 写值，已删除；
+              // 真正的错误文案由 handleAuth 里的 passwordError(pwd) 给到 authError。
+              setPasswordRules(checkPasswordRules(pwd));
             }
           }}
           className="input-field mb-2"
@@ -278,7 +277,6 @@ export function AuthModal({ open, onClose, onSignedIn }: AuthModalProps) {
               setAuthMode(authMode === 'login' ? 'register' : 'login');
               setAuthError('');
               setEmailError('');
-              setPasswordError('');
               setPassword('');
               setConfirmPassword('');
               setEmail('');

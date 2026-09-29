@@ -227,8 +227,8 @@ test('T-46/T-47：每个 API 调用只有一个归属文件（拆分不产生重
   assert.deepEqual(callers('/api/login'), ['auth/AuthModal.tsx']);
   assert.deepEqual(callers('/api/notifications/read_all'), ['notifications/useNotificationCenter.ts']);
   assert.deepEqual(callers('/api/history_item'), ['notifications/useNotificationCenter.ts']);
-  // 题库：数据层一个入口（另有一个**从未被引用**的旧组件 QuestionBank.tsx，归 T-48 处置）
-  assert.ok(callers('/api/question_bank').includes('interview/questionBank.ts'), '题库取数未收敛到 questionBank.ts');
+  // 题库：数据层一个入口（原先那个从未被引用的 `src/QuestionBank.tsx` 已在 T-48 删除）
+  assert.deepEqual(callers('/api/question_bank'), ['interview/questionBank.ts'], '题库取数归属不唯一');
   assert.ok(!code.get('App.tsx').includes('/api/question_bank'), 'App.tsx 里仍内联题库取数');
 });
 

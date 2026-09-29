@@ -13,7 +13,7 @@ import type { NotificationCenterApi } from './useNotificationCenter';
 export function NotificationCenter({ center }: { center: NotificationCenterApi }) {
   const {
     history, notifications, unreadCount, expandedHistoryId, setExpandedHistoryId,
-    highlightId, historyListRef, infoTab, setInfoTab,
+    highlightId, infoTab, setInfoTab,
     markAllRead, deleteNotification, clearAllNotifications, handleNotificationClick,
   } = center;
 
@@ -80,7 +80,8 @@ export function NotificationCenter({ center }: { center: NotificationCenterApi }
         <div className="p-3">
           <span className="text-xs text-slate-400 font-medium">面试记录</span>
           {history.length === 0 && <p className="text-center py-6 text-slate-400 text-sm">暂无面试记录</p>}
-          <ul ref={historyListRef} className="space-y-2 mt-2 max-h-80 overflow-y-auto scroll-smooth">
+          {/* T-48：原先这里挂着一个只写不读的 `ref={historyListRef}`，已删除。 */}
+          <ul className="space-y-2 mt-2 max-h-80 overflow-y-auto scroll-smooth">
             {history.map((h) => (
               <li
                 key={h.id}

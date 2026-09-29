@@ -351,8 +351,8 @@
 | T-45 | **新功能** | 拆分 `AdminPanel` 组件 | 3h | T-44 | ✅ |
 | T-46 | **新功能** | 拆分 `InterviewRoom` 组件 | 4h | T-44 | ✅ |
 | T-47 | **新功能** | 拆分 `ReportView`/`ProfilePanel`/`NotificationCenter`/`QuestionBank` | 4h | T-44 | ✅ |
-| T-48 | **新功能** | 死代码清理（`historyListRef`、`QuestionBank.tsx` 处置、`_passwordError`） | 2h | T-47 | ⬜ |
-| T-49 | **修复 Bug** | `q.tags?.map` 可选链，题库缺字段不崩（FR-9.2） | 1h | T-47 | ⬜ |
+| T-48 | **新功能** | 死代码清理（`historyListRef`、`QuestionBank.tsx` 处置、`_passwordError`） | 2h | T-47 | ✅ |
+| T-49 | **修复 Bug** | `q.tags?.map` 可选链，题库缺字段不崩（FR-9.2） | 1h | T-47 | ✅ |
 
 **验收标准**
 - T-34：`vite.config.ts` 含 `server.proxy`；**构建产物中 grep 不到 `127.0.0.1`**；预览/HTTPS 环境下**所有按钮可点**
@@ -393,8 +393,9 @@
   - `src/App.tsx`：**2189 → 227 行**，只剩顶部导航 + 落地页 + 管理员提示卡 + 6 个视图的装配
 - 契约测试：`frontend/tests/component-split-contract.test.mjs`（新增 10 项：全树 ≤400 行、
   `App.tsx` 是装配层、单一所有者、接口归属、无反向依赖，含 2 组判别力自检）
-- 一键验收：`cd backend; .\venv\Scripts\python.exe scripts\verify_t46_t47_manual.py`
-  （不起外网、不自签令牌、不手工复制 Token）；T-44/T-45 的脚本仍退出码 0
+- 一键验收：`cd backend; .\venv\Scripts\python.exe scripts\verify_t46_t49_manual.py`
+  （**统一入口**，覆盖 T-46 ~ T-49；旧的 `verify_t46_t47_manual.py` 已并入。
+  不起外网、不自签令牌、不手工复制 Token）；T-44/T-45 的脚本仍退出码 0
 - 报告：`docs/31-manual-verification.md`
 - 现状：全树 **30 个 `.ts/.tsx`，最大文件 383 行**（`useInterviewSession.ts`）；
   `App.tsx` 227 行；`npm run lint` 43 errors（结构性 Hook 规则 refs/immutability/purity 全为 0）
@@ -403,6 +404,29 @@
   已在 `docs/31` §1/§4 显式登记
 - **未碰 T-48 / T-49 的地盘**：`historyListRef`、`src/QuestionBank.tsx`、`_passwordError`、
   `q.tags.map`（仍无可选链）全部原样保留
+
+**T-49 / T-48 交付与验证（2026-09-30）**
+
+- T-49（先做，一行救命代码）：
+  - 新增 `src/interview/questionBankEntry.ts`：`questionTags(entry)` 用 `Array.isArray`
+    把"缺字段 / `null` / 非数组 / 条目本身为 null"一起挡住，返回 `[]`；
+    **刻意不 import `config`**（`import.meta.env` 在 Node 里会抛），因此行为能被直接单测
+  - `QuestionBankModal.tsx`：`q.tags.map(` → `questionTags(q).map(`
+  - 线索：被删的死组件 `src/QuestionBank.tsx` 里写的**恰恰是** `q.tags?.map(...)`
+    —— 死代码会让人误以为洞已补上
+- T-48（后做，涉及删文件）：
+  - 删 `historyListRef`（`useNotificationCenter` 的声明 + API 字段 + `NotificationCenter` 的 `<ul ref>`）：
+    它只写不读，高亮滚动走的是 `record-${id}` + `scrollIntoView`
+  - 删 `_passwordError` / `setPasswordError`（`AuthModal`）：3 处写入、0 处读取
+  - `git rm src/QuestionBank.tsx`：从未被任何地方 import 的旧题库组件
+- 契约测试：`frontend/tests/question-bank-robustness.test.mjs`（6 项，**真实行为断言** +
+  源码结构 + 判别力）、`frontend/tests/dead-code-contract.test.mjs`（8 项，全库 grep 为 0
+  + 判别力 + "不许删错"的反向断言）
+- 一键验收：`cd backend; .\venv\Scripts\python.exe scripts\verify_t46_t49_manual.py`
+  （C 段 ⑩ / ⑪ 两节 + 一次独立 `node` 行为取证）；T-44/T-45 的脚本仍退出码 0
+- 报告：`docs/32-manual-verification.md`
+- 现状：全树仍 30 个 `.ts/.tsx`（新增 `questionBankEntry.ts` 与删除 `QuestionBank.tsx` 相抵）；
+  契约测试 62 → **76 项**；`npm run lint` 43 → **42 errors**（少了 `_passwordError` 那条 unused-vars）
 
 ---
 

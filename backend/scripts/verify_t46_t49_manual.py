@@ -1,11 +1,11 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""T-46 / T-47 人工验收：面谈主流程 / 报告 / 个人中心 / 通知中心 / 题库拆分。
+"""T-46 ~ T-49 人工验收：拆分（面谈/报告/资料/通知/题库）+ 题库缺字段不崩 + 死代码清理。
 
 一条命令，**不起服务、不联网、不用手动复制 Token、不花钱**：
 
     cd backend
-    .\\venv\\Scripts\\python.exe scripts\\verify_t46_t47_manual.py
+    .\\venv\\Scripts\\python.exe scripts\\verify_t46_t49_manual.py
 
 可选参数：
     --skip-tsc     跳过 B 段（TypeScript 全量类型检查）
@@ -16,15 +16,16 @@
 ────────────────────────────────────────────────────────────────────────────
 它由四段**互不依赖**的取证拼成，任何一段单独看都不足以证明"拆干净了"：
 
-  0. 预检        —— node 用哪个可执行文件、13 个目标文件在不在、node_modules 有没有。
+  0. 预检        —— node 用哪个可执行文件、14 个目标文件在不在、node_modules 有没有。
   A. 契约测试    —— `node --test --test-reporter=tap` 跑 frontend/tests/**/*.test.mjs，
                     要求 `fail=0`，且**点名用例必须真的出现过**
                     （防止"测试文件被删/改名"后 0 项 0 失败式假通过）。
   B. 类型检查    —— `tsc -b` 退出码必须为 0（拆分最容易死在类型上）。
   C. 独立复核    —— **本脚本自己重扫源码**，不 import 测试里的任何辅助函数：
                     逐条核对"全树 ≤400 行 / App.tsx 是装配层 / 单一所有者 /
-                    接口归属 / 无反向依赖 / T-42 与 T-43 的不变量随代码一起搬走"，
-                    并且带**判别力自检**（把拆分前的形状喂进同一个判定函数，必须判为失败）。
+                    接口归属 / 无反向依赖 / T-42 与 T-43 的不变量随代码一起搬走 /
+                    T-49 题库缺字段不崩 / T-48 死代码全库为 0"，
+                    并且带**判别力自检**（把修复前的形状喂进同一个判定函数，必须判为失败）。
   D. 构建探测    —— `vite build`，**默认跳过**（见 §边界）。
 
 ────────────────────────────────────────────────────────────────────────────
@@ -37,7 +38,7 @@
     沙箱禁止命名管道）。与 docs/29 §3、docs/30 §4 记录的是同一个**沙箱边界**，
     不是本次改动的问题：本脚本把它标成 `[ENV]` 而非 `[FAIL]`；`tsc -b` 不受影响。
   * **`npm run lint` 本来就是红的**（HEAD 上仅 App.tsx 就有 31 条）。
-    T-46 / T-47 把代码搬了家，条数结构随之变化：本脚本 C 段只核对
+    T-46 ~ T-49 把代码搬了家、又删了死代码，条数结构随之变化：本脚本 C 段只核对
     "没有新增结构性违规"（判据见 `check_lint_invariants`），不假装 lint 是绿的。
   * **A 段依赖测试输出里的中文用例名**，因此固定用 TAP 报告器
     （默认 spec 报告器会打 `ⓘ`（U+2139），在 GBK 控制台上让 Python 抛 UnicodeEncodeError）。
@@ -57,7 +58,7 @@ FRONTEND_DIR = os.path.join(REPO_DIR, "frontend")
 SRC_DIR = os.path.join(FRONTEND_DIR, "src")
 TESTS_DIR = os.path.join(FRONTEND_DIR, "tests")
 
-# T-46 / T-47 的交付物（相对 frontend/）
+# T-46 ~ T-49 的交付物（相对 frontend/）
 DELIVERABLES = [
     "src/interview/useInterviewTimeout.ts",
     "src/interview/useSpeech.ts",
@@ -66,6 +67,7 @@ DELIVERABLES = [
     "src/interview/InterviewRoom.tsx",
     "src/interview/resumeUpload.ts",
     "src/interview/questionBank.ts",
+    "src/interview/questionBankEntry.ts",
     "src/interview/QuestionBankModal.tsx",
     "src/report/ReportView.tsx",
     "src/notifications/useNotificationCenter.ts",
@@ -112,6 +114,10 @@ PRESERVED_INVARIANTS = {
         'data-testid="report-timeout-note"',       # T-43 标注
         "isTimeoutReport(report)",
         "TIMEOUT_REPORT_NOTE",
+    ],
+    "src/interview/QuestionBankModal.tsx": [
+        "questionTags(q).map(",                    # T-49 缺字段不崩
+        "questionBank[selectedBankCategory]?.map(",
     ],
     "src/App.tsx": [
         "useAuth()",                               # T-44 认证唯一真源
@@ -176,6 +182,11 @@ REQUIRED_TEST_NAMES = [
     "T-46：面试状态只有一处声明",
     "T-46/T-47：每个 API 调用只有一个归属文件",
     "T-47：App.tsx 只做装配 —— 报告屏与面试屏分别由 <ReportView> / <InterviewRoom> 承载",
+    "T-49：缺 tags 的题目返回空数组，而不是抛异常",
+    "判别力：直接写 q.tags.map 在缺字段时**确实会崩**",
+    "T-48：`historyListRef` 全库为 0",
+    "T-48：死组件 `src/QuestionBank.tsx` 已删除，且无人 import 它",
+    "T-48：清理后题库链路仍然完整",
 ]
 
 LINE_BUDGET = 400
@@ -303,7 +314,7 @@ def segment_preflight():
 
     missing = [rel for rel in DELIVERABLES if not os.path.exists(os.path.join(FRONTEND_DIR, rel))]
     if missing:
-        bad("T-46 / T-47 的交付物缺失：%s" % "、".join(missing))
+        bad("T-46 ~ T-49 的交付物缺失：%s" % "、".join(missing))
     else:
         ok("%d 个目标文件全部就位（面谈/报告/通知/资料/登录/题库）" % len(DELIVERABLES))
 
@@ -371,10 +382,10 @@ def segment_contract_tests(node_path):
     else:
         bad("有 %d 项契约测试失败（完整输出请直接跑 npm run test:node）" % failed)
 
-    if tests >= 55:
-        ok("测试数量合理（%d ≥ 55，说明既有契约测试没被删）" % tests)
+    if tests >= 70:
+        ok("测试数量合理（%d ≥ 70，说明既有契约测试没被删）" % tests)
     else:
-        bad("只跑了 %d 项测试（预期 ≥ 55）—— 测试文件可能被删或没被匹配到" % tests)
+        bad("只跑了 %d 项测试（预期 ≥ 70）—— 测试文件可能被删或没被匹配到" % tests)
 
     for name in REQUIRED_TEST_NAMES:
         if name in out:
@@ -390,7 +401,7 @@ def segment_contract_tests(node_path):
 # ---------------------------------------------------------------------------
 
 def segment_tsc(node_path, args):
-    section("B. TypeScript 全量类型检查（tsc -b，跨 13 个新文件 + App.tsx 重接线）")
+    section("B. TypeScript 全量类型检查（tsc -b，覆盖拆分后的全部新文件 + App.tsx 重接线）")
     if args.skip_tsc:
         skip("--skip-tsc：按要求跳过")
         SEG["B"] = None
@@ -447,7 +458,8 @@ def over_budget(sources, budget=LINE_BUDGET):
 
 
 def segment_source_recheck(node_path):
-    section("C. 独立复核（本脚本自己扫源码，不复用测试里的辅助函数）")
+    section("C. 独立复核（本脚本自己扫源码，不复用测试里的辅助函数）"
+            "：拆分 / 防崩 / 死代码清理")
     fail_before = len(FAILED)
 
     sources = walk_sources()
@@ -513,7 +525,7 @@ def segment_source_recheck(node_path):
     if empty:
         bad("③ 这些交付物是空的：%s" % "、".join(empty))
     else:
-        ok("③ 13 个交付物全部非空")
+        ok("③ %d 个交付物全部非空" % len(DELIVERABLES))
 
     # ④ 单一所有者
     owner_problems = []
@@ -578,8 +590,137 @@ def segment_source_recheck(node_path):
     # ⑨ lint 结构性不变量（lint 本来就是红的，这里只守"没有新增结构性违规"）
     check_lint_invariants(sources, node_path)
 
+    # ⑩ T-49 / FR-9.2：题库条目缺字段不许崩
+    check_question_bank_robustness(sources, node_path)
+
+    # ⑪ T-48：死代码全库为 0（historyListRef / _passwordError / QuestionBank.tsx）
+    check_dead_code_removed(sources)
+
     # 本段的结论只看"这一段的 fail 数有没有增加"，不被 A / B 段的历史失败污染。
     SEG["C"] = (len(FAILED) == fail_before)
+
+
+# ---------------------------------------------------------------------------
+# C-⑩ T-49 / FR-9.2：题库缺字段不崩
+# ---------------------------------------------------------------------------
+
+# 渲染层不允许出现的裸写法（缺 tags 即 TypeError）
+BARE_TAG_MAP = re.compile(r"\bq\.tags\.map\(")
+
+
+def check_question_bank_robustness(sources, node_path=None):
+    entry = sources.get("interview/questionBankEntry.ts", "")
+    modal = code_only(sources.get("interview/QuestionBankModal.tsx", ""))
+
+    if "export function questionTags" in entry:
+        ok("⑩ T-49：防御性读取 questionTags() 已独立成文件（不 import config，Node 里能直接跑行为测试）")
+    else:
+        bad("⑩ T-49：questionBankEntry.ts 里没有 questionTags()")
+    if re.search(r"from\s+'\.\./config'", entry):
+        bad("⑩ T-49：questionBankEntry.ts import 了 config（import.meta.env 在 Node 里会抛，行为测试跑不了）")
+    else:
+        ok("⑩ T-49：questionBankEntry.ts 不依赖 import.meta.env")
+
+    if "questionTags(q).map(" in modal:
+        ok("⑩ T-49：题库弹窗的标签渲染走 questionTags(q)")
+    else:
+        bad("⑩ T-49：题库弹窗没有用 questionTags 渲染标签")
+    if BARE_TAG_MAP.search(modal):
+        bad("⑩ T-49：题库弹窗里仍有裸 `q.tags.map(` —— 一条缺字段的题目就白屏")
+    else:
+        ok("⑩ T-49：全库无裸 `q.tags.map(`（去注释后）")
+    if "questionBank[selectedBankCategory]?.map(" in modal:
+        ok("⑩ T-49：分类整体缺失时也有可选链防护")
+    else:
+        bad("⑩ T-49：`questionBank[cat]?.map` 的可选链丢了")
+
+    # 判别力自检：修复前的写法必须被同一个判定抓到
+    before = "<span>{q.tags.map(tag => <i key={tag}>{tag}</i>)}</span>"
+    if BARE_TAG_MAP.search(before):
+        ok("⑩ 判别力自检：修复前的 `q.tags.map(` 被判为命中（说明上面的 0 不是恒真）")
+    else:
+        bad("⑩ 判别力自检失败：修复前的写法居然没被判定函数抓到")
+
+    # 独立**行为**取证：直接让 node 跑那个纯函数（不经过任何测试文件），
+    # 既证明"缺字段返回 []"，也证明"裸写法确实会崩"（判别力）。
+    if not node_path:
+        env_problem("没有 node，跳过 ⑩ 的行为取证")
+        return
+    probe = (
+        "import {questionTags} from './src/interview/questionBankEntry.ts';"
+        "const cases=[{},{tags:undefined},{tags:null},{tags:'str'},{tags:{}},null,undefined,{tags:['a','b']}];"
+        "const empty=out=>Array.isArray(out)&&out.length===0;"
+        "const got=cases.map(c=>questionTags(c));"
+        "const allEmpty=got.slice(0,7).every(empty);"
+        "const keeps=got[7].length===2;"
+        "let throws=false;"
+        "try{(q=>q.tags.map(t=>t))({});}catch(e){throws=e instanceof TypeError;}"
+        "console.log((allEmpty&&keeps&&throws)?'PROBE_OK':'PROBE_BAD '+JSON.stringify({got,throws}));"
+    )
+    code, out = run([node_path, "--input-type=module", "-e", probe], timeout=120)
+    if code == 0 and "PROBE_OK" in out:
+        ok("⑩ 行为取证（独立跑 node）：8 种缺字段输入全部返回 []，而裸 q.tags.map 确实抛 TypeError")
+    else:
+        bad("⑩ 行为取证失败（exit=%s）：%s" % (code, out.strip()[:200]))
+
+
+# ---------------------------------------------------------------------------
+# C-⑪ T-48：死代码清理
+# ---------------------------------------------------------------------------
+
+DEAD_CODE_PATTERNS = {
+    "historyListRef（只写不读的 ref）": re.compile(r"\bhistoryListRef\b"),
+    "_passwordError（只写不读的状态）": re.compile(r"\b_passwordError\b"),
+    "setPasswordError（死状态的写入）": re.compile(r"\bsetPasswordError\b"),
+}
+
+
+def check_dead_code_removed(sources):
+    code_sources = {name: code_only(src) for name, src in sources.items()}
+
+    for label, pattern in DEAD_CODE_PATTERNS.items():
+        hits = [name for name, src in code_sources.items() if pattern.search(src)]
+        if hits:
+            bad("⑪ T-48：%s 仍在 %s 里" % (label, "、".join(hits)))
+        else:
+            ok("⑪ T-48：%s —— 全库为 0" % label)
+
+    # 判别力自检：把修复前的写法喂回同一个判定
+    before = "const [_passwordError, setPasswordError] = useState('');\n<ul ref={historyListRef}>"
+    caught = [label for label, pattern in DEAD_CODE_PATTERNS.items() if pattern.search(before)]
+    if len(caught) == 3:
+        ok("⑪ 判别力自检：修复前的三处死代码写法全部被判为命中（说明上面的 0 不是恒真）")
+    else:
+        bad("⑪ 判别力自检失败：只认出 %d/3 处死代码" % len(caught))
+
+    dead_file = os.path.join(SRC_DIR, "QuestionBank.tsx")
+    alive_file = os.path.join(SRC_DIR, "interview", "QuestionBankModal.tsx")
+    if os.path.exists(dead_file):
+        bad("⑪ T-48：死组件 src/QuestionBank.tsx 仍然存在")
+    elif not os.path.exists(alive_file):
+        bad("⑪ T-48：把活的 QuestionBankModal.tsx 也删了")
+    else:
+        ok("⑪ T-48：死组件 src/QuestionBank.tsx 已删除，活的 QuestionBankModal.tsx 仍在")
+
+    importers = [
+        name for name, src in code_sources.items()
+        if re.search(r"from\s+'[^']*/QuestionBank'", src)
+    ]
+    if importers:
+        bad("⑪ T-48：仍有文件 import 已删除的 QuestionBank：%s" % "、".join(importers))
+    else:
+        ok("⑪ T-48：无人 import 已删除的 QuestionBank 组件")
+
+    # 清理不许把活的链路一起删掉
+    missing = [
+        rel for rel in ("interview/questionBank.ts", "interview/questionBankEntry.ts",
+                        "interview/QuestionBankModal.tsx")
+        if rel not in sources
+    ]
+    if missing:
+        bad("⑪ T-48：清理误删了活文件：%s" % "、".join(missing))
+    else:
+        ok("⑪ T-48：题库三个活文件（取数 / 防崩读取 / 弹窗）都还在")
 
 
 # 这三条是"拆分最容易踩、且一定是真 bug"的结构性 Hook 规则。
@@ -636,7 +777,7 @@ def check_lint_invariants(sources, node_path):
 
     hits = {rule: counts.get(rule, 0) for rule in STRUCTURAL_RULES}
     if any(hits.values()):
-        bad("⑨ T-46 / T-47 引入了结构性 Hook 违规：%s" % hits)
+        bad("⑨ T-46 ~ T-49 引入了结构性 Hook 违规：%s" % hits)
     else:
         ok("⑨ 结构性 Hook 规则全为 0（%s）—— 拆分没有写坏 Hook" % "、".join(STRUCTURAL_RULES))
     say("     eslint 现状（**不作为门槛**，HEAD 上就是红的）：%d errors / %d warnings；Top 规则 %s"
@@ -711,22 +852,22 @@ def summary():
         for item in FAILED:
             say("    - %s" % item)
         say("")
-        say("❌ T-46 / T-47 人工验收未通过")
+        say("❌ T-46 ~ T-49 人工验收未通过")
         return 1
 
     say("")
-    say("✅ T-46 / T-47 人工验收通过")
+    say("✅ T-46 ~ T-49 人工验收通过")
     return 0
 
 
 def main():
     _make_stdout_forgiving()
-    parser = argparse.ArgumentParser(description="T-46 / T-47 一键人工验收（离线、无需 Token）")
+    parser = argparse.ArgumentParser(description="T-46 ~ T-49 一键人工验收（离线、无需 Token）")
     parser.add_argument("--skip-tsc", action="store_true", help="跳过 TypeScript 类型检查")
     parser.add_argument("--with-build", action="store_true", help="额外尝试 vite build")
     args = parser.parse_args()
 
-    say("T-46 / T-47 人工验收：面谈主流程 / 报告 / 个人中心 / 通知中心 / 题库拆分")
+    say("T-46 ~ T-49 人工验收：拆分（面谈/报告/资料/通知/题库）+ 题库缺字段不崩 + 死代码清理")
     say("仓库：%s" % REPO_DIR)
 
     node_path = segment_preflight()

@@ -1,11 +1,16 @@
 # T-46 / T-47 人工验收：InterviewRoom + ReportView / ProfilePanel / NotificationCenter / QuestionBank 拆分
 
+> ⏭️ **后续**：T-48（死代码清理）/ T-49（题库缺字段不崩）见 `docs/32-manual-verification.md`。
+> 验收脚本已升级为覆盖 T-46 ~ T-49 的统一入口 `backend/scripts/verify_t46_t49_manual.py`
+> （本文档下面出现的旧脚本名 `verify_t46_t47_manual.py` 已并入该入口）。
+> 本文档记录的是 T-46 / T-47 当时的事实，此后不再更新。
+>
 > 对应任务：`docs/03-tasks.md` 的 **T-46**（拆分 `InterviewRoom`）与 **T-47**
 > （拆分 `ReportView` / `ProfilePanel` / `NotificationCenter` / `QuestionBank`）
 > 上游：`docs/30-manual-verification.md`（T-44 路由化 + T-45 AdminPanel 拆分）
 > 交付物（前端）：见下「一、拆了什么」的文件清单
 > 交付物（契约/验收）：`frontend/tests/component-split-contract.test.mjs`、
-> `backend/scripts/verify_t46_t47_manual.py`
+> `backend/scripts/verify_t46_t49_manual.py`
 
 ## 1. 这次到底改了什么
 
@@ -59,11 +64,14 @@ Props 类型），不是新的界面元素；`ReportView` 的 22 行"未命中"�
 
 ```powershell
 cd backend
-.\venv\Scripts\python.exe scripts\verify_t46_t47_manual.py
+.\venv\Scripts\python.exe scripts\verify_t46_t49_manual.py
 ```
 
 可选参数：`--skip-tsc`（跳过类型检查）、`--with-build`（额外尝试 `vite build`）。
 退出码：0 = 通过；1 = 未通过；2 = 环境问题。
+
+> 该脚本后来扩到 T-48 / T-49（C 段多了 ⑩ / ⑪ 两节 + 一次独立的 node 行为取证），
+> 因此现在的实跑行数与本文档 §2 记录的当时输出略有差异：`tests=76`、C 段 40+ 条 `[PASS]`。
 
 ### 它由四段**互不依赖**的取证拼成
 
@@ -78,7 +86,7 @@ cd backend
 ### 最近一次实跑结果
 
 ```
-$ cd backend; .\venv\Scripts\python.exe scripts\verify_t46_t47_manual.py
+$ cd backend; .\venv\Scripts\python.exe scripts\verify_t46_t49_manual.py
 0. 预检        [PASS] node（v24.9.0）/ 13 个文件齐 / node_modules 在 / 6 个契约测试文件
 A. 契约测试    [PASS] tests=62 pass=62 fail=0；点名用例 6/6 出现
 B. 类型检查    [PASS] tsc -b 退出码 0

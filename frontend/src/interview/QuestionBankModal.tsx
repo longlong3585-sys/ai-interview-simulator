@@ -4,12 +4,13 @@
  * 拆分前"打开题库 + 拉取数据"这段 `try/catch/finally` 在顶部导航和落地页
  * 各抄了一份；现在收敛成组件内的一个 `open` 副作用，只有一份。
  *
- * 注意 `q.tags.map(...)` **没有**可选链 —— 题库条目缺 `tags` 字段时仍会崩，
- * 那属于 T-49（FR-9.2）的修复范围，本次拆分刻意原样保留，不抢后续任务。
+ * T-49 / FR-9.2：标签渲染改走 `questionTags(q)`（缺 `tags` 字段返回 `[]`）。
+ * 修复前这里写的是 `q.tags.map(...)` —— 一条缺字段的题目就让整个题库白屏。
  */
 
 import { useEffect, useState } from 'react';
-import { fetchQuestionBank, type QuestionBankData } from './questionBank';
+import { fetchQuestionBank } from './questionBank';
+import { questionTags, type QuestionBankData } from './questionBankEntry';
 
 export function QuestionBankModal({ open, onClose }: { open: boolean; onClose: () => void }) {
   const [questionBank, setQuestionBank] = useState<QuestionBankData>({});
@@ -80,7 +81,7 @@ export function QuestionBankModal({ open, onClose }: { open: boolean; onClose: (
                     <span className={`text-[10px] px-2 py-0.5 rounded-full font-medium ${q.difficulty === '困难' ? 'bg-red-100 text-red-600' : q.difficulty === '中等' ? 'bg-amber-100 text-amber-600' : 'bg-emerald-100 text-emerald-600'}`}>
                       {q.difficulty}
                     </span>
-                    {q.tags.map(tag => (
+                    {questionTags(q).map(tag => (
                       <span key={tag} className="text-[10px] px-1.5 py-0.5 rounded-full bg-slate-200 text-slate-500">{tag}</span>
                     ))}
                   </div>
