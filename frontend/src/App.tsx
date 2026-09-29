@@ -1,6 +1,21 @@
 import { useState, useEffect, useRef } from 'react';
 import { API_BASE_URL } from './config';
 import { authFetch } from './services/api';
+import { ToastHost, type ToastMessage } from './components/Toast';
+import { nextToastId } from './components/toastSeq';
+import {
+  TIMEOUT_REPORT_NOTE,
+  formatCountdown,
+  isTimeoutEnded,
+  isTimeoutReport,
+  isTimeoutResponse,
+  remainingSeconds,
+  resolveDeadline,
+  timeoutLockNotice,
+  type DeadlineSource,
+  type SessionTimeFacts,
+  type TimeoutLockNotice,
+} from './interview/timeout';
 import { checkPasswordRules, passwordError } from './utils/passwordRules';
 
 function AdminPanelContent({ token }: { token: string | null }) {
@@ -462,6 +477,39 @@ function App() {
   const [interviewFinished, setInterviewFinished] = useState(false);
   const [timeLeft, setTimeLeft] = useState<number | null>(null);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // ------------------------------------------------------------------------
+  // T-42 / FR-4.12：超时强制闭环的状态。
+  //
+  // 原实现只有 `setTimeLeft(15 * 60)` + 一个逐秒自减的 setInterval：
+  //   ① 时长硬编码在前端，服务端改了时长则两边各说各话；
+  //   ② 自减式倒计时在标签页被挂起/节流后比真实时间慢；
+  //   ③ 归零时只调了 `endInterview`，**没有任何锁定状态** ——
+  //      输入区还在，用户还能继续答题（服务端到点后其实会 409）。
+  // 这里改为：时长全部来自服务端，倒计时按**死线**重算，到点即锁定。
+  // ------------------------------------------------------------------------
+  const [interviewDurationSeconds, setInterviewDurationSeconds] = useState<number | null>(null);
+  const [deadlineSource, setDeadlineSource] = useState<DeadlineSource>('none');
+  const [interviewLocked, setInterviewLocked] = useState(false);
+  const [lockNotice, setLockNotice] = useState<TimeoutLockNotice | null>(null);
+  const [toast, setToast] = useState<ToastMessage | null>(null);
+  /** 服务端死线的本地镜像（epoch 毫秒）；定时器与事件监听都读它，避免闭包读到旧值。 */
+  const deadlineRef = useRef<number | null>(null);
+  /** config 下发时长的镜像：供**不重新渲染**的回调（visibilitychange）取用。 */
+  const durationRef = useRef<number | null>(null);
+  /**
+   * 面试"世代号"：每开始 / 锁定 / 结束 / 复位一场面试就 +1。
+   * 用来丢弃**过期的异步响应**（见 `syncDeadlineFromServer`）——
+   * 一个回来得太晚的会话同步，会把已经结束的面试重新装回倒计时。
+   */
+  const interviewGenerationRef = useRef(0);
+  /**
+   * T-42 / Bug 3A：定时器与 setTimeout 必须拿到**最新**的 endInterview。
+   * 原实现在 `sendMessage` 里 `setTimeout(() => endInterview(), 1500)` ——
+   * 那个闭包捕获的是**本次渲染之前**的 `messages`，于是
+   * "最后一轮问答"既不在报告入参里，`messages.length === 0` 的判断也可能
+   * 用旧值命中（超时后弹"还没有任何对话，无法生成报告"）。
+   */
+  const endInterviewRef = useRef<() => Promise<void>>(async () => {});
   // 题库弹窗
   const [showQuestionBank, setShowQuestionBank] = useState(false);
   const [selectedBankCategory, setSelectedBankCategory] = useState('后端开发');
@@ -534,6 +582,171 @@ function App() {
     };
   }, []);
 
+  // ==========================================================================
+  // T-42 / FR-4.12：超时强制闭环（服务端死线 → 倒计时 → 到点锁死 UI）
+  // ==========================================================================
+
+  const stopTimer = () => {
+    if (timerRef.current) {
+      clearInterval(timerRef.current);
+      timerRef.current = null;
+    }
+  };
+
+  /**
+   * 锁定 UI。这是超时闭环的**唯一终态入口**：锁定后
+   * 输入区会被整块销毁（不是置灰）、所有写入口关闭，并弹出一条
+   * 不可错过的 Toast（FR-4.12 第 ③ 条"明确反馈"）。
+   */
+  const lockInterview = (notice: TimeoutLockNotice) => {
+    stopTimer();
+    deadlineRef.current = null;
+    interviewGenerationRef.current += 1;
+    setTimeLeft(0);
+    setInterviewLocked(true);
+    setLockNotice(notice);
+    setInput('');
+    setLoading(false);
+    setToast({
+      id: nextToastId(),
+      tone: 'error',
+      text: notice.title,
+      detail: notice.message,
+      // 超时反馈必须被看见：不自动消失，由用户确认（服务端 `detail` 也一并展示）。
+      persistent: true,
+    });
+  };
+
+  /** 到点（或服务端判定超时）后把界面锁死。 */
+  const lockByServerTimeout = (body?: unknown) => {
+    lockInterview(timeoutLockNotice(body));
+  };
+
+  /** 定时器 tick：**每次都按死线重算**，不做逐秒自减（见 timeout.ts 注释）。 */
+  const tickInterviewCountdown = () => {
+    const deadline = deadlineRef.current;
+    if (deadline === null) return;
+    const remaining = remainingSeconds(deadline, Date.now());
+    if (remaining === null) return;
+    setTimeLeft(remaining);
+    if (remaining <= 0) {
+      // 本地到点即锁定：FR-4.12 要求前端"立刻打断主流程"，
+      // 不能等下一次请求返回 409 才告诉用户（那中间还能继续输入）。
+      lockInterview(timeoutLockNotice(null));
+    }
+  };
+
+  const startTimer = () => {
+    stopTimer();
+    timerRef.current = setInterval(tickInterviewCountdown, 1000);
+  };
+
+  /**
+   * 用服务端下发的时间事实**重新武装**倒计时。
+   *
+   * `facts` 可以是 `GET /api/interview/session` 的 `session`，
+   * 也可以是 `POST /api/start_interview` 的响应（它不带死线，
+   * 此时退回 config 下发的 `duration_seconds` —— 仍以服务端为准）。
+   */
+  const armInterviewDeadline = (
+    facts: SessionTimeFacts | null,
+    fallbackDurationSeconds: number | null = null,
+  ) => {
+    const resolved = resolveDeadline(
+      facts,
+      Date.now(),
+      fallbackDurationSeconds ?? durationRef.current,
+    );
+    deadlineRef.current = resolved.deadlineMs;
+    setDeadlineSource(resolved.source);
+    if (resolved.deadlineMs === null) {
+      // 服务端一个时间字段都没给：不自行编造时长，只保留服务端 409 兜底。
+      stopTimer();
+      setTimeLeft(null);
+      return;
+    }
+    setTimeLeft(remainingSeconds(resolved.deadlineMs, Date.now()));
+    startTimer();
+  };
+
+  /**
+   * 向服务端要一次**权威死线**，并顺手让 T-28 的惰性兜底跑一遍。
+   *
+   * 触发时机：面试开始后、标签页重新可见时（挂起恢复）、刷新后。
+   * 超时后 `session` 必为 `null`，此时靠 `last_ended.ended_reason=timeout`
+   * 才能给出"因超时已自动结束"，而不是误报"你没有在面试"。
+   */
+  const syncDeadlineFromServer = async (): Promise<'continuing' | 'timeout' | 'unknown'> => {
+    // 世代号：这一次同步发出后，如果面试已经被结束/复位/登出（世代号 +1），
+    // 那么它的响应就是**过期**的，必须丢弃。
+    // 不加这道闸会出现真实的错乱：用户在报告页上看到一条"面试已超时"的
+    // Toast，因为一个几百毫秒前发出、回来时面试早已结束的同步请求
+    // 又把倒计时（甚至锁定态）重新装了上去。
+    const generation = interviewGenerationRef.current;
+    try {
+      const res = await authFetch('/api/interview/session', { method: 'GET' });
+      if (!res.ok) return 'unknown';
+      const data = await res.json();
+      if (generation !== interviewGenerationRef.current) return 'unknown';
+      if (data && data.session) {
+        armInterviewDeadline(data.session as SessionTimeFacts, null);
+        return 'continuing';
+      }
+      if (isTimeoutEnded(data && data.last_ended)) {
+        // 刷新/回到前台时才发现超时：`session` 已是 null，唯一能说明
+        // "发生过什么"的就是 `last_ended`。没有这一步，用户只会看到
+        // "你没有任何面试"，以为进度丢了（docs/28 §1 的 ③）。
+        lockByServerTimeout({
+          detail: '上一场面试已因超时自动结束（服务端在本次同步时确认），无法继续答题。',
+        });
+        return 'timeout';
+      }
+      return 'unknown';
+    } catch (err) {
+      console.error('面试会话同步失败', err);
+      return 'unknown';
+    }
+  };
+
+  /** 超时锁定面板上"重新开始"用到：把面试相关状态整体复位（服务端锁已由 T-28 释放）。 */
+  const resetInterviewFlow = () => {
+    stopTimer();
+    deadlineRef.current = null;
+    interviewGenerationRef.current += 1;
+    setInterviewLocked(false);
+    setLockNotice(null);
+    setInterviewStarted(false);
+    setInterviewFinished(false);
+    setMessages([]);
+    setQuestions([]);
+    setQuestionStatus([]);
+    setTotalQuestions(0);
+    setCurrentQuestionIndex(0);
+    setTimeLeft(null);
+    setInput('');
+    setHasResume(false);
+    setResumePreview('');
+    setResumeFileName('');
+    setResumeFullText('');
+  };
+
+  /**
+   * 标签页重新可见时按服务端死线**重新校正**一次倒计时。
+   *
+   * 场景：手机锁屏 / 切走标签页几分钟。后台 setInterval 会被浏览器节流，
+   * 回到前台时本地剩余时间可能已经不可信；顺便让服务端跑一次超时兜底 ——
+   * "挂起再恢复"正是 Bug 3B 里被手工绕过的那条路径。
+   */
+  useEffect(() => {
+    if (!interviewStarted || interviewLocked) return;
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'visible') void syncDeadlineFromServer();
+    };
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => document.removeEventListener('visibilitychange', onVisibilityChange);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [interviewStarted, interviewLocked, token]);
+
   // 语音识别初始化
   useEffect(() => {
     if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
@@ -587,6 +800,9 @@ function App() {
   // 发送消息
   const sendMessage = async () => {
     if (!input.trim() || loading || !hasResume || !token) return;
+    // T-42：锁定后写入口全部关闭（输入区在锁定态已被销毁，这里是第二道防线，
+    // 挡住"锁定瞬间已在途"的提交）。
+    if (interviewLocked || interviewFinished) return;
 
     const lowerInput = input.trim().toLowerCase();
     // T-13 / FR-4.10：跳过词不再硬编码，改由后端 GET /api/interview/config 下发
@@ -616,6 +832,27 @@ function App() {
         body: JSON.stringify(bodyObj)
       });
       const data = await res.json();
+
+      // T-42 / FR-4.12：服务端判定超时（409 + interview_timeout）。
+      // 这一轮**没有**被记进会话，所以要把乐观插入的用户气泡撤回 ——
+      // 否则用户会以为"这句答上了"，而报告里根本没有它。
+      // 注意必须按 `code` 精确区分：`no_active_session` / `version_conflict`
+      // 同样是 409，却不是超时（见 interview/timeout.ts 的判别力注释）。
+      if (isTimeoutResponse(res.status, data)) {
+        setMessages(prev => prev.slice(0, -1));
+        lockByServerTimeout(data);
+        return;
+      }
+      if (!res.ok) {
+        setMessages(prev => prev.slice(0, -1));
+        setToast({
+          id: nextToastId(),
+          tone: 'warn',
+          text: typeof data?.detail === 'string' ? data.detail : '发送失败，请稍后重试',
+        });
+        return;
+      }
+
       const aiContent = data.reply || '';
       const aiMessage = { role: 'assistant', content: aiContent };
       setMessages(prev => [...prev, aiMessage]);
@@ -639,7 +876,10 @@ function App() {
 
       if (data.finished) {
         setInterviewFinished(true);
-        setTimeout(() => endInterview(), 1500);
+        // T-42 / Bug 3A：走 ref 拿**最新**的 endInterview。
+        // 直接写 `endInterview()` 会捕获本次渲染之前的 messages，
+        // 最后一条回答就进不了报告入参（也不会出现在保存的历史里）。
+        setTimeout(() => endInterviewRef.current(), 1500);
       }
 
       if (enableSpeech && aiContent) speakText(aiContent);
@@ -657,7 +897,7 @@ function App() {
   };
 
   const skipQuestion = async () => {
-    if (loading || !interviewStarted || interviewFinished) return;
+    if (loading || !interviewStarted || interviewFinished || interviewLocked) return;
     setLoading(true);
     try {
       const res = await authFetch('/api/skip_question', {
@@ -666,6 +906,19 @@ function App() {
         body: JSON.stringify({})
       });
       const data = await res.json();
+      // T-42：跳过是另一条写路径，同样会被服务端兜底拦下（T-28 P10）。
+      if (isTimeoutResponse(res.status, data)) {
+        lockByServerTimeout(data);
+        return;
+      }
+      if (!res.ok) {
+        setToast({
+          id: nextToastId(),
+          tone: 'warn',
+          text: typeof data?.detail === 'string' ? data.detail : '跳过失败，请稍后重试',
+        });
+        return;
+      }
       const aiMessage = { role: 'assistant', content: data.reply };
       setMessages(prev => [...prev, { role: 'user', content: '[跳过此题]' }, aiMessage]);
       if (data.current_index !== undefined) {
@@ -678,7 +931,7 @@ function App() {
       }
       if (data.finished) {
         setInterviewFinished(true);
-        setTimeout(() => endInterview(), 1500);
+        setTimeout(() => endInterviewRef.current(), 1500);
       }
     } catch (err: any) {
       console.error(err);
@@ -728,8 +981,11 @@ function App() {
         setQuestionStatus([]);
         setTotalQuestions(0);
         setInterviewFinished(false);
-        if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
+        stopTimer();
+        deadlineRef.current = null;
         setTimeLeft(null);
+        setInterviewLocked(false);
+        setLockNotice(null);
         if (data.full_text) setResumeFullText(data.full_text);
         setResumeError('');
       } else {
@@ -781,19 +1037,21 @@ function App() {
         setMessages([
           { role: 'assistant', content: data.greeting }
         ]);
-        setTimeLeft(15 * 60);
-        if (timerRef.current) clearInterval(timerRef.current);
-        timerRef.current = setInterval(() => {
-          setTimeLeft(prev => {
-            if (prev === null || prev <= 1) {
-              clearInterval(timerRef.current!);
-              timerRef.current = null;
-              endInterview();
-              return 0;
-            }
-            return prev - 1;
-          });
-        }, 1000);
+        setInterviewLocked(false);
+        setLockNotice(null);
+        // 新一代面试：让任何在途的旧同步响应失效，再武装本场的倒计时。
+        interviewGenerationRef.current += 1;
+        // ------------------------------------------------------------------
+        // T-42 / FR-4.12：时长以**服务端**为唯一来源。
+        //
+        // 原实现是 `setTimeLeft(15 * 60)` + 逐秒自减：服务端把时长调小
+        // （`INTERVIEW_DURATION_SECONDS`）后，前端还在按 15 分钟倒计时，
+        // 用户会在"看起来还剩 10 分钟"时被服务端 409 拦下 —— 两边各说各话。
+        // `start_interview` 的响应不带死线，因此这里先用 config 下发的
+        // `duration_seconds` 武装，紧接着向会话读接口要一次**权威死线**。
+        // ------------------------------------------------------------------
+        armInterviewDeadline(data, interviewDurationSeconds);
+        void syncDeadlineFromServer();
       } else {
         setResumeError(data.detail || '开始面试失败');
       }
@@ -811,13 +1069,12 @@ function App() {
   };
 
   const endInterview = async () => {
-    if (timerRef.current) {
-      clearInterval(timerRef.current);
-      timerRef.current = null;
-    }
+    stopTimer();
     setTimeLeft(null);
-    if (messages.length === 0) {
-      alert('还没有任何对话，无法生成报告');
+    if (messages.length === 0 && !interviewLocked) {
+      // 零对话且不是超时锁定 —— 服务端确实没有可评的对象（T-26 起报告
+      // 以服务端会话为准，前端已无从判断内容，只能拦住明显无意义的请求）。
+      setToast({ id: nextToastId(), tone: 'warn', text: '还没有任何对话，无法生成报告' });
       return;
     }
     setLoading(true);
@@ -833,6 +1090,9 @@ function App() {
         // 也让评分输入不再受客户端影响（此前可以删改聊天记录来影响评分）。
       });
       const data = await res.json();
+      // T-42 / T-43：报告可能来自一场**超时**的面试（含零作答，
+      // T-27 会补上「未及作答，无法评分」）。锁定态随之解除 ——
+      // 用户已经拿到结果，服务端锁在 T-28 里也早已释放。
       setReport(data);
       setMessages([]);
       setHasResume(false);
@@ -846,6 +1106,12 @@ function App() {
       setResumePreview('');
       setResumeFileName('');
       setInput('');
+      setInterviewLocked(false);
+      setLockNotice(null);
+      deadlineRef.current = null;
+      setTimeLeft(null);
+      // 报告已出，本场结束：作废任何在途的会话同步响应。
+      interviewGenerationRef.current += 1;
 
       if (data && data.expression_score !== undefined) {
         try {
@@ -867,11 +1133,22 @@ function App() {
       }
     } catch (err: any) {
       console.error(err);
-      alert('生成报告失败，请稍后重试');
+      setToast({ id: nextToastId(), tone: 'error', text: '生成报告失败，请稍后重试' });
     } finally {
       setLoading(false);
     }
   };
+
+  /**
+   * T-42 / Bug 3A：把**每次渲染的最新** endInterview 存进 ref。
+   * 定时器 / setTimeout / visibilitychange 这类"跨渲染存活"的回调一律
+   * 通过 `endInterviewRef.current()` 调用，避免闭包捕获旧的 `messages`
+   * （原 Bug：最后一轮问答进不了报告，或被误判成"还没有任何对话"）。
+   * 本组件没有提前 return，因此这些 Hook 的位置是稳定的。
+   */
+  useEffect(() => {
+    endInterviewRef.current = endInterview;
+  });
 
   // 登录/注册
   const loadCaptcha = async () => {
@@ -1023,6 +1300,12 @@ function App() {
       if (res.ok) {
         const data = await res.json();
         if (Array.isArray(data.skip_words)) setSkipWords(data.skip_words);
+        // T-42 / FR-4.12：面试时长的唯一来源是服务端。原先这里只取了
+        // skip_words，时长仍由前端硬编码 15 分钟 —— 服务端一改时长，
+        // 前端倒计时与"到点锁定"就整体失准。
+        const duration = typeof data.duration_seconds === 'number' ? data.duration_seconds : null;
+        durationRef.current = duration;
+        setInterviewDurationSeconds(duration);
       }
     } catch (err) {
       console.error('面试配置加载失败', err);
@@ -1245,6 +1528,14 @@ function App() {
     localStorage.removeItem('token');
     localStorage.removeItem('role');
     localStorage.removeItem('username');
+    // T-42：登出必须把超时锁定态一起清干净 ——
+    // 否则下一个账号登录后会继承"上一场的锁定面板 + 超时 Toast"。
+    stopTimer();
+    deadlineRef.current = null;
+    interviewGenerationRef.current += 1;
+    setInterviewLocked(false);
+    setLockNotice(null);
+    setToast(null);
     setHistory([]);
     setMessages([]);
     setReport(null);
@@ -1804,6 +2095,7 @@ function App() {
                       `技术深度：${report.technical_score}/10\n` +
                       `逻辑思维：${report.logic_score}/10\n` +
                       `已回答：${report.answered_count || 0}/${report.total_questions} 个问题\n\n` +
+                      (isTimeoutReport(report) ? `【${TIMEOUT_REPORT_NOTE}】\n\n` : '') +
                       `总结：${report.details}\n\n` +
                       `改进建议：${report.suggestion}`;
                     const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
@@ -1822,6 +2114,26 @@ function App() {
                   <p className="text-primary-100 text-xs">AI 面试官根据对话内容生成的详细评估</p>
                 </div>
                 <div className="p-6">
+                  {/* T-43 / FR-4.5：超时结束的报告必须**明说自己是怎么结束的**。
+                      没有这一行，用户看到的是一份和正常完成一模一样的评分 ——
+                      「只答了 2 题却拿了 6 分」会被当成真实水平，
+                      而事实是"没答的部分根本没评分"（T-27 的口径）。 */}
+                  {isTimeoutReport(report) && (
+                    <div
+                      data-testid="report-timeout-note"
+                      className="mb-5 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 flex items-start gap-2.5"
+                    >
+                      <span className="text-lg leading-none mt-0.5">⏰</span>
+                      <div>
+                        <p className="text-sm font-bold text-amber-900">{TIMEOUT_REPORT_NOTE}</p>
+                        <p className="text-xs text-amber-800 mt-1 leading-relaxed">
+                          本场面试在倒计时归零时由<strong>服务端</strong>自动结束：
+                          已作答的题目按正常口径评分，<strong>未及作答的题目不计入扣分</strong>。
+                          想要完整评估，请重新开始一场面试。
+                        </p>
+                      </div>
+                    </div>
+                  )}
                   <div className="flex items-center justify-center mb-6">
                     <div className={`w-28 h-28 rounded-full flex items-center justify-center border-4 ${report.overall_score >= 7 ? 'border-emerald-300 bg-emerald-50' : report.overall_score >= 4 ? 'border-amber-300 bg-amber-50' : 'border-red-300 bg-red-50'}`}>
                       <div className="text-center">
@@ -1857,6 +2169,9 @@ function App() {
               {report.total_questions !== undefined && (
                 <p className="text-center text-xs text-slate-400 mb-4">
                   回答了 <span className="font-semibold text-primary-600">{report.answered_count || 0}</span> / {report.total_questions} 个问题
+                  {isTimeoutReport(report) && (
+                    <span className="text-amber-600">（超时未及作答的题目不计入扣分）</span>
+                  )}
                 </p>
               )}
               <div className="space-y-3">
@@ -2064,13 +2379,17 @@ function App() {
                   )}
                 </div>
                 {timeLeft !== null && (
-                  <div className={`flex items-center gap-1.5 text-sm font-mono font-bold px-3 py-1.5 rounded-xl ${
+                  <div
+                    data-testid="interview-countdown"
+                    data-countdown-source={deadlineSource}
+                    className={`flex items-center gap-1.5 text-sm font-mono font-bold px-3 py-1.5 rounded-xl ${
+                    interviewLocked ? 'bg-red-100 text-red-700 border border-red-300' :
                     timeLeft <= 60 ? 'bg-red-50 text-red-600 border border-red-200 animate-pulse' :
                     timeLeft <= 180 ? 'bg-amber-50 text-amber-700 border border-amber-200' :
                     'bg-primary-50 text-primary-700 border border-primary-200'
                   }`}>
                     <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
-                    {Math.floor(timeLeft / 60)}:{String(timeLeft % 60).padStart(2, '0')}
+                    {formatCountdown(timeLeft)}
                   </div>
                 )}
               </div>
@@ -2107,7 +2426,51 @@ function App() {
             )}
           </div>
 
-          {/* 输入区域 */}
+          {/* 输入区域 —— T-42 / FR-4.12：超时锁定后**整块销毁**（不是置灰）。
+              置灰仍留着一个可聚焦的控件，且"看起来还能再答一句"，
+              与服务端到点后必然 409 的事实相矛盾。这里直接把输入区、
+              跳过、发送一起从 DOM 里摘掉，只留下两条出路：
+              出报告（超时口径）或重开一场。 */}
+          {interviewLocked ? (
+            <div
+              data-testid="interview-locked"
+              className="rounded-2xl border-2 border-red-200 bg-red-50/70 p-5 animate-slide-up"
+            >
+              <div className="flex items-start gap-3">
+                <div className="w-10 h-10 rounded-xl bg-red-100 text-red-600 flex items-center justify-center shrink-0 text-lg">⏰</div>
+                <div className="flex-1">
+                  <h4 className="font-bold text-red-800 text-sm">
+                    {lockNotice?.title || '本场面试已超时自动结束'}
+                  </h4>
+                  <p className="text-sm text-red-700 mt-1 leading-relaxed">
+                    {lockNotice?.message}
+                  </p>
+                  {lockNotice?.hint && (
+                    <p className="text-xs text-red-600/90 mt-2 leading-relaxed">{lockNotice.hint}</p>
+                  )}
+                  <div className="flex flex-wrap gap-2 mt-4">
+                    <button
+                      onClick={() => endInterviewRef.current()}
+                      disabled={loading}
+                      data-testid="timeout-generate-report"
+                      className="btn-primary text-sm px-4 h-10 flex items-center gap-1.5"
+                    >
+                      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 17v-6h13M9 17H4a1 1 0 01-1-1V5a1 1 0 011-1h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V16" /></svg>
+                      生成报告（按超时口径评分）
+                    </button>
+                    <button
+                      onClick={resetInterviewFlow}
+                      data-testid="timeout-restart"
+                      className="btn-secondary text-sm px-4 h-10 flex items-center gap-1.5"
+                    >
+                      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
+                      重新开始（需重新上传简历）
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          ) : (
           <div className="flex gap-2 items-end">
             <textarea
               className="flex-1 input-field resize-none min-h-[48px] max-h-24 text-sm"
@@ -2138,6 +2501,7 @@ function App() {
               结束
             </button>
           </div>
+          )}
             </>
           )}
         </>
@@ -2342,6 +2706,8 @@ function App() {
         </div>
       )}
       </main>
+      {/* T-42 / FR-4.12：超时锁定等"必须被看见"的反馈统一走 Toast（禁用 alert）。 */}
+      <ToastHost toast={toast} onClose={() => setToast(null)} />
     </div>
   );
 }
