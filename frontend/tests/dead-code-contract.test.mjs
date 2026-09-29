@@ -134,10 +134,23 @@ test('T-48：清理后题库链路仍然完整（三个活文件都在，且取�
   ]) {
     assert.ok(SOURCES.has(rel), `缺少 ${rel}`);
   }
+  // T-36：不能再靠 `src.includes('/api/question_bank')` 判归属 —— 统一层把
+  // **公开端点前缀**登记在 `services/authResponse.ts`（那是路由表，不是调用点）。
+  // 因此改成"认调用形态"，两种写法都要认：收敛前的 `${API_BASE_URL}/api/x` 与收敛后的 `'/api/x'`。
+  const callExpr = /(?:Get|Post|Put|Patch|Delete|Fetch|request)\s*\(\s*(?:[`'"]\$\{API_BASE_URL\}\/api\/question_bank|[`'"]\/api\/question_bank)/i;
   const callers = [...CODE_SOURCES.entries()]
-    .filter(([, src]) => src.includes('/api/question_bank'))
-    .map(([name]) => name);
+    .filter(([, src]) => callExpr.test(src))
+    .map(([name]) => name)
+    .sort();
   assert.deepEqual(callers, ['interview/questionBank.ts'], `题库取数归属不唯一：${callers.join('、')}`);
+  // 判别力自检：两种写法都必须被认出来，且无关端点不能被误认。
+  assert.match(
+    "await fetch(`${API_BASE_URL}/api/question_bank`)",
+    callExpr,
+    '归属判定认不出收敛前的写法'
+  );
+  assert.match("await publicGet('/api/question_bank')", callExpr, '归属判定认不出收敛后的写法');
+  assert.ok(!callExpr.test("await apiGet('/api/notifications')"), '归属判定把别的端点也认成了题库');
   assert.match(SOURCES.get('App.tsx'), /<QuestionBankModal/, 'App.tsx 仍应装配题库弹窗');
 });
 

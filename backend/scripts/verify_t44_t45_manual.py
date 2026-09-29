@@ -503,11 +503,21 @@ def segment_source_recheck():
         ok("③ AuthContext 提供 Provider 与 useAuth")
     else:
         bad("③ AuthContext 缺少 AuthProvider / useAuth")
-    for key in ("token", "role", "username"):
-        if re.search(r"writeStored\('%s'" % key, ctx):
-            ok("③ AuthContext 把 %s 纳入持久化写路径" % key)
+    # T-40：持久化从"逐键 writeStored"收敛成"一次写整份快照"，
+    # 键清单的唯一来源搬到了 `auth/authStorage.ts` 的 `AUTH_PERSISTED_KEYS`（含新增的 userId）。
+    # 因此这里改成断言"AuthContext 调用那条唯一写路径"，键清单去 authStorage 里核对。
+    if re.search(r"persistAuthSnapshot\(", ctx):
+        ok("③ AuthContext 调用唯一持久化写路径 persistAuthSnapshot")
+    else:
+        bad("③ AuthContext 没有调用唯一持久化写路径（T-40 的收敛被回退）")
+    storage_path = os.path.join(SRC_DIR, "auth", "authStorage.ts")
+    storage = open(storage_path, "r", encoding="utf-8").read() if os.path.exists(storage_path) else ""
+    for key in ("token", "userId", "role", "username"):
+        # authStorage 里键名可能是字面量，也可能是 `AUTH_*_STORAGE_KEY = 'token'` 常量。
+        if re.search(r"'%s'" % key, storage) or re.search(r"=%s" % key, storage):
+            ok("③ 持久化清单纳入 %s（authStorage.AUTH_PERSISTED_KEYS）" % key)
         else:
-            bad("③ AuthContext 没有持久化 %s" % key)
+            bad("③ 持久化清单没有 %s（刷新会丢 / 登出会漏清）" % key)
 
     # ④ FR-11.3 条件 Hook
     hooks, early = audit_hook_order(panel, "AdminPanel")

@@ -12,7 +12,7 @@
  */
 
 import { useEffect, useState } from 'react';
-import { API_BASE_URL } from '../config';
+import { publicGet, publicPost } from '../services/api';
 import { useAuth } from './AuthContext';
 import { checkPasswordRules, passwordError } from '../utils/passwordRules';
 
@@ -48,7 +48,8 @@ export function AuthModal({ open, onClose, onSignedIn }: AuthModalProps) {
     setCaptchaLoading(true);
     setCaptchaCode('');
     try {
-      const res = await fetch(`${API_BASE_URL}/api/captcha`);
+      // T-36：公开端点也走统一层（令牌注入 / 续期头 / 401 语义只有一个落点）。
+      const res = await publicGet('/api/captcha');
       if (!res.ok) {
         console.error('验证码加载失败 HTTP', res.status);
         return;
@@ -108,14 +109,13 @@ export function AuthModal({ open, onClose, onSignedIn }: AuthModalProps) {
     }
     setAuthLoading(true);
     try {
-      const url = authMode === 'login' ? `${API_BASE_URL}/api/login` : `${API_BASE_URL}/api/register`;
+      const url = authMode === 'login' ? '/api/login' : '/api/register';
       const params = authMode === 'login'
         ? new URLSearchParams({ username, password, captcha_id: captchaId, captcha_code: captchaCode })
         : new URLSearchParams({ username, password, email, captcha_id: captchaId, captcha_code: captchaCode });
-      const res = await fetch(url, {
-        method: 'POST',
+      // T-36：表单编码由调用方声明，统一层只负责出口（不覆盖已给的 Content-Type）。
+      const res = await publicPost(url, params, {
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: params.toString()
       });
       const data = await res.json();
       if (res.ok) {

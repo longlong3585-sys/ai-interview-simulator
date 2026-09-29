@@ -7,7 +7,6 @@
 
 import { useEffect, useState } from 'react';
 import { authFetch } from '../../services/api';
-import { API_BASE_URL } from '../../config';
 
 export default function UsersTable({ token }: { token: string | null }) {
   const [users, setUsers] = useState<any[]>([]);
@@ -17,7 +16,7 @@ export default function UsersTable({ token }: { token: string | null }) {
     if (!token) return;
     setLoading(true);
     try {
-      const res = await authFetch(`${API_BASE_URL}/api/admin/users`);
+      const res = await authFetch('/api/admin/users');
       const data = await res.json();
       setUsers(data);
     } catch (err) {
@@ -35,10 +34,10 @@ export default function UsersTable({ token }: { token: string | null }) {
 
   const resetPassword = async (userId: number, newPassword: string) => {
     try {
-      const res = await authFetch(`${API_BASE_URL}/api/admin/users/${userId}/reset_password`, {
+      const res = await authFetch(`/api/admin/users/${userId}/reset_password`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: new URLSearchParams({ new_password: newPassword }).toString(),
+        body: new URLSearchParams({ new_password: newPassword }),
       });
       if (res.ok) {
         alert('密码重置成功');
@@ -54,7 +53,7 @@ export default function UsersTable({ token }: { token: string | null }) {
 
   const toggleActive = async (userId: number) => {
     try {
-      const res = await authFetch(`${API_BASE_URL}/api/admin/users/${userId}/toggle_active`, {
+      const res = await authFetch(`/api/admin/users/${userId}/toggle_active`, {
         method: 'PATCH',
       });
       if (res.ok) {
@@ -71,7 +70,7 @@ export default function UsersTable({ token }: { token: string | null }) {
 
   const deleteUser = async (userId: number) => {
     try {
-      const res = await authFetch(`${API_BASE_URL}/api/admin/users/${userId}`, { method: 'DELETE' });
+      const res = await authFetch(`/api/admin/users/${userId}`, { method: 'DELETE' });
       if (res.ok) {
         fetchUsers();
       } else {

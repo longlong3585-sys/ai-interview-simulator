@@ -4,6 +4,7 @@ import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom'
 import './index.css'
 import App from './App.tsx'
 import AdminPage from './admin/AdminPage.tsx'
+import { AuthBridge } from './auth/AuthBridge.tsx'
 import { AuthProvider } from './auth/AuthContext.tsx'
 import { RequireAuth } from './auth/RequireAuth.tsx'
 
@@ -27,6 +28,8 @@ import { RequireAuth } from './auth/RequireAuth.tsx'
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <AuthProvider>
+      {/* T-36：把 AuthContext 的登出接进统一 HTTP 出口（401 → 统一登出 + 续期头集中处理）。 */}
+      <AuthBridge />
       <BrowserRouter>
         <Routes>
           <Route path="/admin" element={<AdminPage />} />

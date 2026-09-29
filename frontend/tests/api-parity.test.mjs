@@ -71,14 +71,41 @@ function stripComments(source) {
     .join('\n');
 }
 
-/** 收集前端调用的 API 路径。 */
+/**
+ * 统一 HTTP 出口导出的**函数名**（T-36 起所有请求都从这里出去）。
+ * 只有这些函数的第一个参数才被当作"被调用的 API 路径"来收集——
+ * 否则代码里任何一个字符串字面量都可能被误判成接口。
+ */
+const API_CALL_NAMES = [
+  'request', 'authFetch', 'publicFetch',
+  'apiGet', 'apiPost', 'apiPut', 'apiPatch', 'apiDelete',
+  'publicGet', 'publicPost',
+];
+
+/** 该文件是否从 `services/api` 引入了给定函数（先确认"真的是这个出口"，再收路径）。 */
+function importsFromApi(src, name) {
+  const re = new RegExp(
+    `import\\s*\\{[^}]*\\b${name}\\b[^}]*\\}\\s*from\\s*['"][^'"]*services/api['"]`
+  );
+  return re.test(src);
+}
+
+/** 收集前端调用的 API 路径（两种写法都收：`${API_BASE_URL}/api/x` 与 `'/api/x'`）。 */
 function collectFrontendPaths() {
   const paths = new Set();
   for (const file of walk(SRC_DIR, (n) => /\.(ts|tsx)$/.test(n))) {
     const src = stripComments(readFileSync(file, 'utf8'));
-    // 形如 `${API_BASE_URL}/api/xxx` 或 `${API_BASE_URL}${someVar}`
+    // 写法 A（T-34 及以前的调用点）：形如 `${API_BASE_URL}/api/xxx`
     for (const m of src.matchAll(/\$\{API_BASE_URL\}(\/api\/[^`'"\s)]*)/g)) {
       paths.add(normalize(m[1]));
+    }
+    // 写法 B（T-36 收敛后）：路径就是普通字符串字面量/模板串，基地址由统一层拼。
+    const callRe = new RegExp(
+      `\\b(${API_CALL_NAMES.join('|')})\\s*\\(\\s*[\`'"](\\/api\\/[^\`'"\\s)]*)`
+    );
+    for (const m of src.matchAll(new RegExp(callRe, 'g'))) {
+      if (!importsFromApi(src, m[1])) continue;
+      paths.add(normalize(m[2]));
     }
   }
   return paths;
@@ -95,6 +122,13 @@ test('后端确实解析出了路由（防止解析器失效导致"假通过"）
   assert.ok(
     frontendPaths.size >= 10,
     `前端仅解析出 ${frontendPaths.size} 条 API 路径，解析器可能已失效`
+  );
+  // T-36：收敛后路径写法从 `${API_BASE_URL}/api/x` 变成普通字面量 `'/api/x'`。
+  // 这条断言专门盯住"新写法仍被收集"——否则解析器会静默变成空集，
+  // 而空集会让下面那条"每个路径后端都有"恒真（假通过）。
+  assert.ok(
+    frontendPaths.has('/api/admin/stats'),
+    'T-36 新写法（`authFetch(\'/api/admin/stats\')`）未被收集到 —— 解析器已失效'
   );
 });
 

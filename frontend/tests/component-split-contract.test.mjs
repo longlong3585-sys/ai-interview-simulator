@@ -214,8 +214,62 @@ test('T-46/T-47：每个 API 调用只有一个归属文件（拆分不产生重
       .map((line) => (line.trim().startsWith('//') ? '' : line.replace(/\s\/\/.*$/, '')))
       .join('\n');
   const code = new Map([...SOURCES.entries()].map(([name, src]) => [name, codeOnly(src)]));
+  /**
+   * T-36：归属判定改成"认调用形态"（`<api 函数>('/api/…')`），而不是简单的
+   * `src.includes(endpoint)` —— 统一层把公开端点登记在 `services/authResponse.ts`，
+   * 那是**路由表**不是调用点，用 includes 会把统一层误判成"第二个调用方"。
+   *
+   * 另外要认"先把路径算出来再请求"的写法（AuthModal 的登录/注册共用同一个 `url` 变量），
+   * 否则会漏收 `/api/login` 这类路径。
+   */
+  /** 直接传参的调用点：`apiPost('/api/login', …)` / `authFetch(\`/api/x/${id}\`)`。 */  const callArgLiteral = /(?:Get|Post|Put|Patch|Delete|Fetch|request)\s*\(\s*[`'"](\/api\/[^`'"\s]*)[`'"]/gi;
+  /**
+   * 另一种写法：**先算 URL 再请求**。AuthModal 的登录/注册共用一个 `url` 变量：
+   * `const url = authMode === 'login' ? '/api/login' : '/api/register';` 然后 `apiPost(url, …)`。
+   * 这里只在"该文件确实拿该变量发过请求"时才把它算成调用点。
+   */
+  function collectViaUrlVar(src) {
+    const found = new Set();
+    for (const m of src.matchAll(/(?:const|let|var)\s+(\w+)\s*=\s*([^;\n]*)/g)) {
+      const [, name, init] = m;
+      if (!/\/api\//.test(init)) continue;
+      const used = new RegExp(`(?:Get|Post|Put|Patch|Delete|Fetch|request)\\s*\\(\\s*\\b${name}\\b`).test(src);
+      if (!used) continue;
+      for (const lit of init.matchAll(/[`'"](\/api\/[^`'"\s]*)[`'"]/g)) found.add(lit[1]);
+    }
+    return found;
+  }
+  /** 统一层自己：这里登记的是**路由表**（哪些是公开端点），不是"某个功能在调它"。 */
+  const API_LAYER = new Set(['services/api.ts', 'services/authResponse.ts']);
+  const stripSlash = (p) => p.replace(/\/+$/, '');
+  // `/api/history_item/${n.target_id}` 这类模板串要归一成 `/api/history_item`，
+  // 否则断言里的静态路径永远匹配不上动态端点。
+  const normalizePath = (p) => stripSlash(p.replace(/\$\{[^}]*\}/g, '')).replace(/\/+$/, '');
+  const collectPaths = (src) => {
+    const found = collectViaUrlVar(src);
+    for (const m of src.matchAll(callArgLiteral)) found.add(m[1]);
+    return new Set([...found].map(normalizePath));
+  };
   const callers = (endpoint) =>
-    [...code.entries()].filter(([, src]) => src.includes(endpoint)).map(([name]) => name).sort();
+    [...code.entries()]
+      .filter(([name]) => !API_LAYER.has(name))
+      .filter(([, src]) => collectPaths(src).has(endpoint))
+      .map(([name]) => name)
+      .sort();
+  // 判别力自检：两种写法都必须被收得到（规则失效会让上面的断言恒真）。
+  assert.ok(
+    collectPaths("const res = await apiPost('/api/login', body);").has('/api/login'),
+    '归属判定认不出"直接传参"写法'
+  );
+  assert.ok(
+    collectPaths("const url = authMode === 'login' ? '/api/login' : '/api/register';\nconst r = await apiPost(url, body);").has('/api/register'),
+    '归属判定认不出"先算 URL 再请求"写法'
+  );
+  // 反向：只是普通字符串常量、没拿来发请求的，不能被算成调用点。
+  assert.ok(
+    !collectPaths("const HELP = '/api/definitely-not-called';").has('/api/definitely-not-called'),
+    '归属判定把普通字符串常量误判成了调用点'
+  );
 
   assert.deepEqual(callers('/api/chat'), ['interview/useInterviewChat.ts']);
   assert.deepEqual(callers('/api/skip_question'), ['interview/useInterviewChat.ts']);

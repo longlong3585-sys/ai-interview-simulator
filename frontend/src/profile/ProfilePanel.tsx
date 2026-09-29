@@ -12,8 +12,7 @@
  */
 
 import { useEffect, useRef, useState } from 'react';
-import { API_BASE_URL } from '../config';
-import { authFetch } from '../services/api';
+import { apiGet, apiPatch, apiPost, resolveApiUrl } from '../services/api';
 import { passwordError } from '../utils/passwordRules';
 
 interface ProfilePanelProps {
@@ -36,15 +35,14 @@ export function ProfilePanel({ open, token, username, onClose, onLogout }: Profi
   const [passwordChangeMsg, setPasswordChangeMsg] = useState('');
   const [passwordChanging, setPasswordChanging] = useState(false);
 
-  const loadUserProfile = async (tok: string) => {
+  // T-36：令牌不再由调用方传入 —— 统一层每请求现读 localStorage，
+  // 因此续期后的新令牌不需要"把 token 重新传一遍"才能生效。
+  const loadUserProfile = async () => {
     try {
       const [profileRes, statsRes] = await Promise.all([
-        fetch(`${API_BASE_URL}/api/user/profile`, {
-          headers: { 'Authorization': `Bearer ${tok}` }
-        }),
-        fetch(`${API_BASE_URL}/api/user/stats`, {
-          headers: { 'Authorization': `Bearer ${tok}` }
-        })
+        // T-36：并发请求同样走统一层（令牌注入 / 401 语义只在 api.ts 里）。
+        apiGet('/api/user/profile'),
+        apiGet('/api/user/stats'),
       ]);
       if (profileRes.ok && statsRes.ok) {
         const profile = await profileRes.json();
@@ -57,7 +55,7 @@ export function ProfilePanel({ open, token, username, onClose, onLogout }: Profi
   };
 
   useEffect(() => {
-    if (token) void loadUserProfile(token);
+    if (token) void loadUserProfile();
   }, [token]);
 
   /**
@@ -107,16 +105,11 @@ export function ProfilePanel({ open, token, username, onClose, onLogout }: Profi
 
     setPasswordChanging(true);
     try {
-      const res = await fetch(`${API_BASE_URL}/api/change_password`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/x-www-form-urlencoded',
-          'Authorization': `Bearer ${token}`
-        },
-        body: new URLSearchParams({
-          old_password: oldPassword,
-          new_password: newPassword
-        }).toString()
+      const res = await apiPost('/api/change_password', new URLSearchParams({
+        old_password: oldPassword,
+        new_password: newPassword,
+      }), {
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       });
 
       const data = await res.json();
@@ -141,15 +134,11 @@ export function ProfilePanel({ open, token, username, onClose, onLogout }: Profi
 
   const saveProfile = async () => {
     if (!token) return;
-    const res = await authFetch('/api/user/profile', {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        nickname: editProfile.nickname,
-        bio: editProfile.bio,
-        gender: editProfile.gender,
-        birthday: editProfile.birthday || null
-      })
+    const res = await apiPatch('/api/user/profile', {
+      nickname: editProfile.nickname,
+      bio: editProfile.bio,
+      gender: editProfile.gender,
+      birthday: editProfile.birthday || null,
     });
     if (res.ok) {
       setUserProfile({ ...editProfile, total_interviews: userProfile.total_interviews, avg_score: userProfile.avg_score });
@@ -183,10 +172,7 @@ export function ProfilePanel({ open, token, username, onClose, onLogout }: Profi
     const formData = new FormData();
     formData.append('file', blob, 'avatar.jpg');
     try {
-      const res = await authFetch('/api/user/avatar', {
-        method: 'POST',
-        body: formData
-      });
+      const res = await apiPost('/api/user/avatar', formData);
       if (res.ok) {
         const data = await res.json();
         setUserProfile((prev: any) => ({ ...prev, avatar: data.avatar_url }));
@@ -217,7 +203,10 @@ export function ProfilePanel({ open, token, username, onClose, onLogout }: Profi
               <div className="text-center">
                 <div className="w-20 h-20 mx-auto rounded-full bg-gray-200 flex items-center justify-center text-3xl overflow-hidden">
                   {userProfile.avatar ? (
-                    <img src={`${API_BASE_URL}${userProfile.avatar}`} alt="avatar" className="w-full h-full object-cover" />
+                    // T-36：URL 只由统一层解析（`avatar` 是后端返回的相对路径
+                    // `/uploads/avatars/xxx`）。同源托管时 `resolveApiUrl` 返回原样的相对路径，
+                    // 分域部署（设了 `VITE_API_BASE_URL`）时自动补上基地址 —— 不再自己拼 host。
+                    <img src={resolveApiUrl(userProfile.avatar)} alt="avatar" className="w-full h-full object-cover" />
                   ) : (
                     '👤'
                   )}

@@ -299,6 +299,45 @@ def walk_sources(root=SRC_DIR):
     return found
 
 
+# —— T-36 之后"接口归属"的判定口径 ——
+# 收敛前是裸 fetch + `${API_BASE_URL}/api/x`，收敛后是 `apiGet('/api/x')` 这类统一层调用。
+# 另外 `services/authResponse.ts` 里有一张**公开端点路由表**（`/api/login` 等），
+# 那是"哪些端点不需要令牌"，不是"谁在调用它"——必须排除，否则会出现假警报。
+API_LAYER_FILES = ("services/api.ts", "services/authResponse.ts")
+
+
+def normalize_endpoint(path):
+    """`/api/history_item/${n.target_id}` → `/api/history_item`。"""
+    return re.sub(r"\$\{[^}]*\}", "", path).rstrip("/")
+
+
+def endpoint_holders(rel, src):
+    """该文件是否**调用**了某个后端接口 → 返回被调用的接口路径集合。"""
+    if rel in API_LAYER_FILES:
+        return set()
+    found = set()
+    pattern = (r"(?:Get|Post|Put|Patch|Delete|Fetch|request)\s*\(\s*"
+               r"[`'\"](\$\{API_BASE_URL\})?(?P<path>/api/[^`'\"\s)]*)")
+    for m in re.finditer(pattern, code_only(src), re.I):
+        p = normalize_endpoint(m.group("path"))
+        if p:
+            found.add(p)
+    # "先算 URL 再请求"：`const url = c ? '/api/login' : '/api/register'` + `apiPost(url, …)`
+    for m in re.finditer(r"(?:const|let|var)\s+(\w+)\s*=\s*([^;\n]*)", code_only(src)):
+        name, init = m.group(1), m.group(2)
+        if "/api/" not in init:
+            continue
+        used = re.search(r"(?:Get|Post|Put|Patch|Delete|Fetch|request)\s*\(\s*\b%s\b" % name,
+                         code_only(src), re.I)
+        if not used:
+            continue
+        for lit in re.finditer(r"[`'\"](\$\{API_BASE_URL\})?(/api/[^`'\"\s)]*)", init):
+            p = normalize_endpoint(lit.group(2))
+            if p:
+                found.add(p)
+    return found
+
+
 # ---------------------------------------------------------------------------
 # 0. 预检
 # ---------------------------------------------------------------------------
@@ -538,16 +577,27 @@ def segment_source_recheck(node_path):
     else:
         ok("④ 锁定态/倒计时/endInterview ref/sendMessage/skipQuestion 各自只有一个所有者")
 
-    # ⑤ 接口归属
+    # ⑤ 接口归属（T-36 起判定改为"认调用形态"，并排除统一层的公开端点路由表）
     endpoint_problems = []
     for endpoint, expected in ENDPOINT_OWNERS.items():
-        holders = sorted(name for name, src in sources.items() if endpoint in code_only(src))
+        holders = sorted(rel for rel, src in sources.items()
+                         if endpoint in endpoint_holders(rel, src))
         if holders != [expected]:
             endpoint_problems.append("%s → %s（预期 %s）" % (endpoint, holders or "无", expected))
     if endpoint_problems:
         bad("⑤ 接口出现重复归属：%s" % "；".join(endpoint_problems))
     else:
         ok("⑤ 10 个后端接口各自只有一个调用方（拆分没有产生重复请求）")
+
+    # 判别力自检：新写法（统一层调用）与旧写法（裸 fetch + 模板串）都必须被认出来。
+    if ("/api/chat" in endpoint_holders("interview/useInterviewChat.ts",
+                                        "const res = await authFetch('/api/chat', { method: 'POST' });")
+            and "/api/captcha" in endpoint_holders("auth/AuthModal.tsx",
+                                                   "await fetch(`${API_BASE_URL}/api/captcha`)")
+            and not endpoint_holders("services/authResponse.ts", "const X = ['/api/login'];")):
+        ok("⑤ 判别力自检：新旧两种写法都认得出，统一层的路由表不会被当成调用方")
+    else:
+        bad("⑤ 判别力自检失败：接口归属判定器可能已失效")
 
     # ⑥ 无反向依赖：除了 main.tsx，没人 import App.tsx
     offenders = [

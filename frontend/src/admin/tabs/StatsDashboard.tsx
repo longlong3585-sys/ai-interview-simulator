@@ -7,7 +7,6 @@
 
 import { useEffect, useState } from 'react';
 import { authFetch } from '../../services/api';
-import { API_BASE_URL } from '../../config';
 
 export default function StatsDashboard({ token }: { token: string | null }) {
   const [stats, setStats] = useState<any>(null);
@@ -19,7 +18,7 @@ export default function StatsDashboard({ token }: { token: string | null }) {
     (async () => {
       setLoading(true);
       try {
-        const res = await authFetch(`${API_BASE_URL}/api/admin/stats`);
+        const res = await authFetch('/api/admin/stats');
         const data = await res.json();
         if (alive) setStats(data);
       } catch (err) {

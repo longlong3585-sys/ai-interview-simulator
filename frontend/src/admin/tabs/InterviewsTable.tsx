@@ -11,7 +11,6 @@
 
 import { useEffect, useState } from 'react';
 import { authFetch } from '../../services/api';
-import { API_BASE_URL } from '../../config';
 import ReportDetailModal, { type InterviewDetail } from '../ReportDetailModal';
 
 export default function InterviewsTable({ token }: { token: string | null }) {
@@ -24,7 +23,7 @@ export default function InterviewsTable({ token }: { token: string | null }) {
     if (!token) return;
     setLoading(true);
     try {
-      const res = await authFetch(`${API_BASE_URL}/api/admin/interviews`);
+      const res = await authFetch('/api/admin/interviews');
       const data = await res.json();
       setInterviews(data);
     } catch (err) {
@@ -43,7 +42,7 @@ export default function InterviewsTable({ token }: { token: string | null }) {
 
   const updateInterview = async (id: number, status: string, comment: string) => {
     try {
-      const res = await authFetch(`${API_BASE_URL}/api/admin/interviews/${id}`, {
+      const res = await authFetch(`/api/admin/interviews/${id}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ status, admin_comment: comment }),
@@ -65,7 +64,7 @@ export default function InterviewsTable({ token }: { token: string | null }) {
   const deleteInterview = async (id: number) => {
     if (!confirm('确定要删除这条面试记录吗？删除后不可恢复。')) return;
     try {
-      const res = await authFetch(`${API_BASE_URL}/api/admin/interviews/${id}`, { method: 'DELETE' });
+      const res = await authFetch(`/api/admin/interviews/${id}`, { method: 'DELETE' });
       if (res.ok) {
         fetchInterviews();
       } else {

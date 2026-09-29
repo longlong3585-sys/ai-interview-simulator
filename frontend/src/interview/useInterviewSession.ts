@@ -12,7 +12,6 @@
  */
 
 import { useEffect, useRef, useState, type DragEvent } from 'react';
-import { API_BASE_URL } from '../config';
 import { authFetch } from '../services/api';
 import { nextToastId } from '../components/toastSeq';
 import { useSpeech } from './useSpeech';
@@ -290,11 +289,10 @@ export function useInterviewSession({
   // T-13 / FR-4.10：面试相关常量的唯一来源是后端。
   // 原先前端把 23 个跳过词硬编码在 sendMessage 里，与后端各存一份，
   // 任一侧改动都会造成"本地判定"与"服务端判定"分歧且无任何报错。
-  const loadInterviewConfig = async (tok: string) => {
+  const loadInterviewConfig = async () => {
     try {
-      const res = await fetch(`${API_BASE_URL}/api/interview/config`, {
-        headers: { 'Authorization': `Bearer ${tok}` }
-      });
+      // T-36：令牌交给统一层注入（`tok` 参数已不再需要）。
+      const res = await authFetch('/api/interview/config');
       if (res.ok) {
         const data = await res.json();
         if (Array.isArray(data.skip_words)) chat.setSkipWords(data.skip_words);
@@ -310,7 +308,7 @@ export function useInterviewSession({
   };
 
   useEffect(() => {
-    if (token) void loadInterviewConfig(token);
+    if (token) void loadInterviewConfig();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [token]);
 
@@ -347,12 +345,10 @@ export function useInterviewSession({
       const savedToken = localStorage.getItem('token');
       if (savedToken) {
         try {
-          const res = await fetch(`${API_BASE_URL}/api/user/profile`, {
-            headers: { 'Authorization': `Bearer ${savedToken}` }
-          });
-          if (!res.ok && res.status === 401) {
-            logout();
-          }
+          // T-36：令牌失效由统一层统一登出并**抛出** `Unauthorized`；
+          // 这里保留原语义 —— 校验失败一律走本 hook 的 `logout()` 收尾
+          // （除了清认证态，还要复位面试进度、超时锁定态）。
+          await authFetch('/api/user/profile');
         } catch {
           logout();
         }

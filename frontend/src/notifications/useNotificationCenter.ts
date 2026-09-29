@@ -11,7 +11,7 @@
  */
 
 import { useEffect, useState } from 'react';
-import { API_BASE_URL } from '../config';
+import { ApiError, apiDelete, apiGet, apiPatch } from '../services/api';
 
 export interface NotificationCenterApi {
   history: any[];
@@ -48,11 +48,10 @@ export function useNotificationCenter({ token, userRole }: UseNotificationCenter
   const [showInfoPanel, setShowInfoPanel] = useState(false);
   const [infoTab, setInfoTab] = useState<'notifications' | 'history'>('notifications');
 
-  const loadHistory = async (tok: string) => {
+  const loadHistory = async () => {
     try {
-      const res = await fetch(`${API_BASE_URL}/api/history`, {
-        headers: { 'Authorization': `Bearer ${tok}` }
-      });
+      // T-36：令牌由统一层注入；`tok` 参数已不再需要。
+      const res = await apiGet('/api/history');
       if (res.ok) {
         const data = await res.json();
         setHistory(data);
@@ -62,11 +61,9 @@ export function useNotificationCenter({ token, userRole }: UseNotificationCenter
     }
   };
 
-  const loadNotifications = async (tok: string) => {
+  const loadNotifications = async () => {
     try {
-      const res = await fetch(`${API_BASE_URL}/api/notifications`, {
-        headers: { 'Authorization': `Bearer ${tok}` }
-      });
+      const res = await apiGet('/api/notifications');
       if (res.ok) {
         const data = await res.json();
         setNotifications(data);
@@ -77,11 +74,9 @@ export function useNotificationCenter({ token, userRole }: UseNotificationCenter
     }
   };
 
-  const loadUnreadCount = async (tok: string) => {
+  const loadUnreadCount = async () => {
     try {
-      const res = await fetch(`${API_BASE_URL}/api/notifications/unread_count`, {
-        headers: { 'Authorization': `Bearer ${tok}` }
-      });
+      const res = await apiGet('/api/notifications/unread_count');
       if (res.ok) {
         const data = await res.json();
         setUnreadCount(data.count);
@@ -94,10 +89,7 @@ export function useNotificationCenter({ token, userRole }: UseNotificationCenter
   const markAllRead = async () => {
     if (!token) return;
     try {
-      await fetch(`${API_BASE_URL}/api/notifications/read_all`, {
-        method: 'PATCH',
-        headers: { 'Authorization': `Bearer ${token}` }
-      });
+      await apiPatch('/api/notifications/read_all');
       setUnreadCount(0);
       setNotifications(notifications.map(n => ({ ...n, is_read: true })));
     } catch (err) {
@@ -108,13 +100,10 @@ export function useNotificationCenter({ token, userRole }: UseNotificationCenter
   const deleteNotification = async (id: number) => {
     if (!token) return;
     try {
-      const res = await fetch(`${API_BASE_URL}/api/notifications/${id}`, {
-        method: 'DELETE',
-        headers: { 'Authorization': `Bearer ${token}` }
-      });
+      const res = await apiDelete(`/api/notifications/${id}`);
       if (res.ok) {
         setNotifications(notifications.filter(n => n.id !== id));
-        loadUnreadCount(token);
+        loadUnreadCount();
       }
     } catch (err) {
       console.error(err);
@@ -124,10 +113,7 @@ export function useNotificationCenter({ token, userRole }: UseNotificationCenter
   const clearAllNotifications = async () => {
     if (!token) return;
     try {
-      await fetch(`${API_BASE_URL}/api/notifications/clear_all`, {
-        method: 'DELETE',
-        headers: { 'Authorization': `Bearer ${token}` }
-      });
+      await apiDelete('/api/notifications/clear_all');
       setNotifications([]);
       setUnreadCount(0);
     } catch (err) {
@@ -139,21 +125,16 @@ export function useNotificationCenter({ token, userRole }: UseNotificationCenter
     if (!token) return;
     if (!n.is_read) {
       try {
-        await fetch(`${API_BASE_URL}/api/notifications/${n.id}/read`, {
-          method: 'PATCH',
-          headers: { 'Authorization': `Bearer ${token}` }
-        });
+        await apiPatch(`/api/notifications/${n.id}/read`);
         setNotifications(notifications.map(item => item.id === n.id ? { ...item, is_read: true } : item));
-        loadUnreadCount(token);
+        loadUnreadCount();
       } catch (err) {
         console.error(err);
       }
     }
     if (n.target_type === 'interview_record' && n.target_id) {
       try {
-        const res = await fetch(`${API_BASE_URL}/api/history_item/${n.target_id}`, {
-          headers: { 'Authorization': `Bearer ${token}` }
-        });
+        const res = await apiGet(`/api/history_item/${n.target_id}`);
         if (res.status === 404) {
           alert('该面试记录已不存在');
           setInfoTab('history');
@@ -174,8 +155,12 @@ export function useNotificationCenter({ token, userRole }: UseNotificationCenter
           setInfoTab('history');
         }
       } catch (err) {
+        // T-36：401 已由统一层处理（登出 + 抛 `Unauthorized`）；
+        // 这里只把它与真实网络错误区分开，避免对已登出的用户再弹一次"网络错误"。
         console.error(err);
-        alert('网络错误，请稍后重试');
+        if (!(err instanceof ApiError && err.status === 401)) {
+          alert('网络错误，请稍后重试');
+        }
       }
     } else {
       setInfoTab('history');
@@ -185,7 +170,7 @@ export function useNotificationCenter({ token, userRole }: UseNotificationCenter
   const openHistory = () => {
     setInfoTab('history');
     setShowInfoPanel(true);
-    if (token) void loadHistory(token);
+    if (token) void loadHistory();
   };
 
   const clear = () => {
@@ -193,6 +178,8 @@ export function useNotificationCenter({ token, userRole }: UseNotificationCenter
     setUnreadCount(0);
     setNotifications([]);
     setShowInfoPanel(false);
+    setExpandedHistoryId(null);
+    setHighlightId(null);
   };
 
   useEffect(() => {
@@ -216,15 +203,22 @@ export function useNotificationCenter({ token, userRole }: UseNotificationCenter
   }, [highlightId]);
 
   useEffect(() => {
-    if (token) {
-      if (userRole === 'admin') {
-        setHistory([]);
-        setUnreadCount(0);
-        setNotifications([]);
-      } else {
-        loadHistory(token);
-        loadUnreadCount(token);
-      }
+    // T-36：令牌清空（用户主动登出，或统一层判定 401 后登出）时，
+    // 本面板的数据必须跟着消失 —— 否则下一个账号会看到上一个账号的历史。
+    if (!token) {
+      setHistory([]);
+      setUnreadCount(0);
+      setNotifications([]);
+      setShowInfoPanel(false);
+      return;
+    }
+    if (userRole === 'admin') {
+      setHistory([]);
+      setUnreadCount(0);
+      setNotifications([]);
+    } else {
+      loadHistory();
+      loadUnreadCount();
     }
   }, [token, userRole]);
 
@@ -236,14 +230,14 @@ export function useNotificationCenter({ token, userRole }: UseNotificationCenter
       return;
     }
     const interval = setInterval(() => {
-      loadUnreadCount(token);
+      loadUnreadCount();
     }, 30000);
     return () => clearInterval(interval);
   }, [token, userRole]);
 
   useEffect(() => {
     if (token && showInfoPanel && userRole !== 'admin') {
-      loadNotifications(token);
+      loadNotifications();
     }
   }, [token, showInfoPanel, userRole]);
 

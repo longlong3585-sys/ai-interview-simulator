@@ -44,6 +44,8 @@ const TABS_STATS = read('admin', 'tabs', 'StatsDashboard.tsx');
 const TABS_USERS = read('admin', 'tabs', 'UsersTable.tsx');
 const TABS_INTERVIEWS = read('admin', 'tabs', 'InterviewsTable.tsx');
 const AUTH_CONTEXT = read('auth', 'AuthContext.tsx');
+// T-40：持久化清单与还原逻辑收敛进 `auth/authStorage.ts`（零依赖纯模块，可在 Node 里真跑）。
+const AUTH_STORAGE = read('auth', 'authStorage.ts');
 const REQUIRE_AUTH = read('auth', 'RequireAuth.tsx');
 // T-46 / T-47：面谈主流程、报告、通知、资料、登录、题库各自独立成文件。
 const AUTH_MODAL = read('auth', 'AuthModal.tsx');
@@ -451,11 +453,19 @@ test('认证状态收敛进 AuthContext：App.tsx 不再自己 localStorage.getI
   );
   assert.match(AUTH_CONTEXT, /export function AuthProvider/, 'AuthContext 未导出 AuthProvider');
   assert.match(AUTH_CONTEXT, /export function useAuth/, 'AuthContext 未导出 useAuth');
-  for (const key of ['token', 'role', 'username']) {
+  // T-40：持久化从"逐键 writeStored"收敛成"一次写整份快照"（authStorage.persistAuthSnapshot），
+  // 键清单也只有一份（authStorage.AUTH_PERSISTED_KEYS）。因此断言改成：
+  // ① AuthContext 必须调用那条唯一写路径；② 四个键（含新增的 userId）都在 authStorage 的清单里。
+  assert.match(
+    AUTH_CONTEXT,
+    /persistAuthSnapshot\(/,
+    'AuthContext 未调用唯一持久化写路径 persistAuthSnapshot'
+  );
+  for (const key of ['token', 'userId', 'role', 'username']) {
     assert.match(
-      AUTH_CONTEXT,
-      new RegExp(`writeStored\\('${key}'`),
-      `AuthContext 未把 ${key} 纳入持久化写路径`
+      AUTH_STORAGE,
+      new RegExp(`'${key}'`),
+      `authStorage 的持久化清单里没有 ${key}（登出会漏清、刷新会丢）`
     );
   }
 });

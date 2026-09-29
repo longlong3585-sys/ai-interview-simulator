@@ -339,11 +339,11 @@
 |---|---|---|---|---|---|
 | T-34 | **修复 Bug** | API 基地址改**相对路径** + Vite `server.proxy` + `VITE_API_BASE_URL`（Bug 4，**P0**） | 2h | — | ✅ |
 | T-35 | **修复 Bug** | CORS 允许来源配置化，`expose_headers` 加 `X-Refreshed-Token`（NFR-10a）—— **拓扑决定：同源托管，暂不需要独立 CORS**（降级为分域备选，见 T-34 交付说明的「部署拓扑决定」） | 1h | T-34 | ⬜ |
-| T-36 | **新功能** | api 层收敛：**24 处裸 `fetch` 全部迁入**统一层（ADR-016 前置） | 4h | T-03,T-34 | ⬜ |
+| T-36 | **新功能** | api 层收敛：**18 处裸 `fetch` 全部迁入**统一层（ADR-016 前置）—— ✅ 交付见 `docs/34-manual-verification.md` | 4h | T-03,T-34 | ✅ |
 | T-37 | **新功能** | Toast 组件 + 全局错误呈现（**禁用 `alert`**）（NFR-13） | 3h | T-03 | ⬜ |
 | T-38 | **新功能** | `ConfirmDialog` 替换 3 处 `confirm`/`prompt`（NFR-13） | 3h | T-37 | ⬜ |
 | T-39 | **新功能** | `ErrorBoundary` 包裹路由出口（NFR-11） | 1h | T-03 | ⬜ |
-| T-40 | **新功能** | `AuthContext`：集中并**持久化 token + userId**（Bug 2 前端） | 3h | T-36 | ⬜ |
+| T-40 | **新功能** | `AuthContext`：集中并**持久化 token + userId**（Bug 2 前端）—— ✅ 交付见 `docs/35-manual-verification.md` | 3h | T-36 | ✅ |
 | T-41 | **修复 Bug** | 挂载时拉取会话并重建视图（Bug 2 前端） | 3h | T-24,T-40 | ⬜ |
 | T-42 | **修复 Bug** | 超时强制闭环：`useRef` 持最新回调 + **锁定 UI/销毁输入区**（Bug 3A/3B） | 3h | T-40 | ✅ |
 | T-43 | **修复 Bug** | 超时报告文案标注"因超时自动结束，仅基于已答部分评分"（FR-4.5） | 1h | T-27,T-42 | ✅ |
