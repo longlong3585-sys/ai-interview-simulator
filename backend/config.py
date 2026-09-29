@@ -60,6 +60,35 @@ CAPTCHA_TTL = 300
 CAPTCHA_MAX_ERRORS = 5
 CAPTCHA_LOCK_MINUTES = 10
 
+# T-28 / FR-4.12：**面试时长上限（秒）**。
+#
+# 为什么要有这个服务端常量：修复前"15 分钟归零"只活在前端的一个
+# `setInterval` 里（`App.tsx: setTimeLeft(15 * 60)`）。前端一旦被绕过
+# （手工发请求、脚本刷接口、标签页被挂起），面试就能无限期继续下去 ——
+# FR-4.12 的业务规则形同虚设。超时时刻必须由**服务端自己掌握**：
+# 死线 = 会话行里的 `created_at`（服务端写入，客户端无法伪造）+ 本常量。
+#
+# 为什么**不**复用 `expires_at`（2h TTL）：那是 ADR-022 的**锁卫生**上限，
+# 与"面试能答多久"是两个语义。把两者压成一个字段会二选一地制造事故：
+# 要么允许用户答 2 小时，要么让一次刷新/断网就把 15 分钟的面试作废。
+#
+# 之所以做成环境变量：验收脚本（`scripts/verify_t28_manual.py`）需要把
+# 15 分钟压成几秒，否则"人工验收"就得真的等一刻钟。
+_INTERVIEW_DURATION_RAW = os.getenv("INTERVIEW_DURATION_SECONDS")
+try:
+    INTERVIEW_DURATION_SECONDS = (int(_INTERVIEW_DURATION_RAW)
+                                 if _INTERVIEW_DURATION_RAW
+                                 else 15 * 60)
+except (TypeError, ValueError):
+    raise ValueError(
+        "INTERVIEW_DURATION_SECONDS 必须是整数秒，当前为 %r" % _INTERVIEW_DURATION_RAW
+    )
+if INTERVIEW_DURATION_SECONDS <= 0:
+    raise ValueError(
+        "INTERVIEW_DURATION_SECONDS 必须为正数（否则每场面试一开始就是超时）：%d"
+        % INTERVIEW_DURATION_SECONDS
+    )
+
 MAX_FILE_SIZE = 5 * 1024 * 1024
 
 # T-09 / FR-10.4：头像后端大小上限，与前端 canvas 裁剪后提交的 2MB 限制保持一致

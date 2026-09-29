@@ -235,6 +235,34 @@ class SessionSnapshot(object):
         """字典序比较即时间序比较 —— 前提是双方都是同格式 UTC ISO 串。"""
         return self.expires_at <= now
 
+    def interview_deadline(self, duration_seconds: float) -> Optional[str]:
+        """面试的**超时死线** = `created_at` + `duration_seconds`（T-28 / FR-4.12）。
+
+        与 `expires_at` 的分工（**不要**把两者混为一谈）：
+
+          * `expires_at` 是 ADR-022 的 **2 小时锁卫生**上限 —— 回答"这行数据
+            还值不值得当成活跃会话"；
+          * 本死线是**业务规则**（15 分钟）—— 回答"这场面试还允许答题吗"。
+
+        起点刻意取 `created_at`（服务端 `start_interview` 写入的列），
+        而不是任何请求里带的时间 —— 客户端自报的时刻没有任何可信度。
+
+        `created_at` 不可解析（历史脏数据）时返回 `None`：调用方按
+        "判不出超时"处理，宁可漏放也不误杀一场正在进行的面试。
+        """
+        try:
+            origin = datetime.fromisoformat(self.created_at)
+        except (TypeError, ValueError):
+            return None
+        return (origin + timedelta(seconds=duration_seconds)).isoformat()
+
+    def is_timed_out(self, now: str, duration_seconds: float) -> bool:
+        """服务端口径的超时判定（T-28 / FR-4.12）。死线判不出时返回 `False`。"""
+        deadline = self.interview_deadline(duration_seconds)
+        if deadline is None:
+            return False
+        return deadline <= now
+
     def summary(self) -> dict:
         """409 响应体用的最小摘要（ADR-022 R-10）。"""
         return {

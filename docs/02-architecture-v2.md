@@ -20,7 +20,7 @@
 | # | 修改点 | 类型 | 影响 ADR / 章节 | 是否需审批 |
 |---|---|---|---|---|
 | **M-1** | **会话/验证码/限流存储载体选型** | 🔴 **关键决策** | **ADR-004R（新增）** | ✅ **必须审批** |
-| M-2 | 超时后会话置 `abandoned` 并**释放唯一锁**，允许立刻重开 | 行为变更 | ADR-022R | ✅ 需审批 |
+| M-2 | 超时后会话置 `abandoned` 并**释放唯一锁**，允许立刻重开 | 行为变更 | ADR-022R | ✅ 需审批（**T-28 已实现**，见 §3.2 的"T-28 实现注记"） |
 | M-3 | 超时报告评分口径：未答题**不计零分** + 前端标注 | 业务规则 | ADR-007R | ✅ 需审批 |
 | M-4 | 错误呈现统一 **Toast**，**禁用 `alert`/`confirm`/`prompt`** | 前端架构 | ADR-025R | ✅ 需审批 |
 | M-5 | 报告契约新增 `ended_reason`；报告改以服务端会话为准 | 契约变更 | ADR-024R | ✅ 需审批 |
@@ -254,6 +254,35 @@ active ──报告生成成功──────────▶ finished     �
    报告就是 `timeout` 口径"。**服务端在 15 分钟到点时主动把会话置为 `abandoned` 属 T-28**；
    在 T-28 接线前，若前端计时器先到点而服务端会话仍是 `active`，那份报告仍会被标成 `completed`
    —— 这一点已在 `docs/27-manual-verification.md` 的"已知边界"中明示。
+
+**T-28 实现注记（2026-09-30，落实 FR-4.12 的"服务端同步兜底"，接上 T-27 的第 4 条边界）**：
+
+1. **超时时刻的归属**：死线 = 会话行 `created_at`（服务端写入的列，客户端不可伪造）
+   + `INTERVIEW_DURATION_SECONDS`（`config.py`，默认 15 分钟，可用环境变量覆盖以便验收）。
+   判定方法 `SessionSnapshot.interview_deadline()` / `is_timed_out()` 落在**数据模型**层
+   （`services/stores/base.py`），**存储层零改动、无需迁移**。
+2. **为什么必须新增常量而不是复用 `expires_at`（2h TTL）**：`expires_at` 是 ADR-022 的
+   **锁卫生**上限（回答"这行数据还值不值得当成活跃会话"），业务死线回答"这场面试还允许
+   答题吗"。把两者压成一个字段必然二选一地制造事故：要么允许用户答 2 小时，
+   要么一次刷新/断网就让 15 分钟的面试作废。（T-22 曾因把 TTL 多减一次而把
+   ADR-022R 的承诺废掉，同类教训。）
+3. **兜底是惰性判定，且必须覆盖每一个会话入口**：`routers/interview.py` 的
+   `_enforce_interview_timeout()` 在 `/api/chat`、`/api/skip_question`、
+   `GET /api/interview/session`（刷新即结算）、`/api/interview/abandon`
+   （到点后才点"放弃"的，`ended_reason` 记 `timeout` 而非 `manual`）、
+   `/api/generate_report`（**必须在判定 `ended_reason` 之前**跑，否则超时面试会被
+   报告路径判成 `completed` + `finished`）、`/api/start_interview`（插入前释放，
+   兑现 ADR-022R"不得把用户锁死在门外"）六处调用。
+   只拦 `/api/chat` 会留下同型漏洞：换一条写路径（skip）或换一个理由（报告）即可绕过。
+4. **接口附加项（均为附加，不破坏既有契约）**：到点后的 409 带
+   `code="interview_timeout"`（与 `no_active_session` 明确区分）+ `ended_reason="timeout"`
+   + `actions` + 会话摘要；`GET /api/interview/session` 增加 `last_ended`
+   （超时后 `session=null`，前端据此给出 FR-4.12 第③条要求的**明确反馈**）；
+   `/api/interview/config` 与 `session` 下发 `duration_seconds` / `deadline_at` /
+   `interview_remaining_seconds`，使前端倒计时以**服务端**死线为准（不再硬编码 15 分钟）。
+5. **与定时清理（T-22）的分工**：`cleanup.py` 继续只管 2 小时 TTL。业务死线要求
+   "用户一点下去就立刻被拦住"，那是惰性兜底的职责；定时器最小粒度是分钟级，
+   靠它兜底意味着超时后还能再答一小时。
 
 ### 3.3 ADR-025R · 错误呈现统一（修订 ADR-025）
 

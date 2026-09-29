@@ -71,6 +71,7 @@
 | T-25 | ✅ 已完成 | 2026-09-30 | `f0c2d86` | **过期行自愈**（ADR-022 R-10）：`start_interview` 在建新会话**之前**先 `abandon_expired_for_user()`。修掉的那一幕自相矛盾是必现的：`GET session -> null`（没在面试）同时 `POST start_interview -> 409`（你已有面试），用户完全无从下手。真正冲突时 409 **直接携带会话摘要**（`session_id`/`current_index`/`last_seq`/`total`/`remaining_seconds` + `actions`），前端无需额外一次往返即可给出"继续上次 / 放弃重开"。**14 项测试**；**破坏性验证：探针全部被抓住**。**交付物**：`scripts/verify_t25_manual.py` |
 | T-26 | ✅ 已完成 | 2026-09-30 | 见 git log | 报告改以**服务端会话**为准：`_build_transcript()` 从 `questions` + `user_answers` + `question_status` 重建对话记录，未答题标 `[尚未作答]`、跳过的题标 `[跳过此题]`、各题状态（answered/skipped/pending）一并下发给评分；`generate_report` **不再接收任何请求体**（`ReportRequest` 类已从 `schemas.py` 删除，前端不再发送 `messages`），无活跃会话 → 409 `no_active_session`。修掉三条路径：① **评分输入可被伪造**（前端删改聊天记录就能影响评分，可自证清白）；② Bug 3A 根因之一（超时后前端状态已乱，传上来的 messages 与真实作答对不上）；③ **白嫖**（没有会话也能凭 messages 换一份"报告"）。**12 项测试**（含"伪造 messages 不得进入 prompt"的核心断言）；**破坏性验证：7 个探针全部被抓住**（首轮 3 个 INVALID 是探针自身的换行符问题，已修）。**交付物**：`scripts/verify_t26_manual.py`（自起服务 + **本机假 AI**，全程不联网、不花钱，可检查真正喂给模型的 prompt） |
 | T-27 | ✅ 已完成 | 2026-09-30 | 见 git log | 评分口径区分**未及作答 / 答不上** + 报告新增 `ended_reason`（FR-4.5 / ADR-007R）。**提示词重写**：新增"本场结束方式"与"三种题目状态处理方式完全不同"两节；`pending` 属**未及作答**、**不得计入扣分**；`skipped` 才是**答不上**、照常计分；旧的无条件"一个都没答上就给全 0"规则被**收窄**到"真正问过的题（answered+skipped）全部无效"。**存储层第 2 次协议修正**（第 1 次见 T-19）：新增 `get_last_ended()`（超时后 `get_active()` 取不到 → 修复前超时**永远拿不到报告**，只能 409）与 `attach_report()`（**只写报告、不动状态**，含 `report IS NULL` 防覆盖守卫）—— 于是 `abandoned + report` 成为一个合法组合，ADR-022R"超时不是 finished"与 ADR-007R"超时仍出报告"**同时**成立。`ended_reason` 与两个计数由**服务端裁决**（覆盖模型输出、拒绝客户端自报）；零作答超时的"未及作答，无法评分"标注由服务端**兜底补齐**（MUST 不能只靠提示词赌模型遵守）。⚠️ 标注条件比 ADR 原文**收窄**一处：额外要求 `skipped=0`，否则"全部主动跳过"会被标成"没机会答"（反向误导，已写成用例）。**12 项存储 + 22 项路由测试**；**破坏性验证：10 个探针全部被抓住**（P3 首轮"漏网"实为**探针没选对模块**，P9/P10 首轮 INVALID 是缩进写错，均已修）。⚠️ 顺带修掉一处测试卫生问题：`test_report_from_session` 每轮 chat/generate 都会**真的去调 DeepSeek**（既花钱又依赖外网），现已全部 mock —— 全套 516 项测试**零真实外网调用**。**交付物**：`scripts/verify_t27_manual.py`、`scripts/probes/probe_t27_report.py`、`docs/27-manual-verification.md` |
+| T-28 | ✅ 已完成 | 2026-09-30 | 见 git log | **后端超时兜底**：服务端自己掌握超时时刻（FR-4.12 / Bug 3B）。修复前"15 分钟"只活在前端的一个 `setInterval` 里（`App.tsx: setTimeLeft(15 * 60)`），归零后再发一次 `POST /api/chat` 服务端照样把这一轮记进会话 —— **前端锁定拦不住手工请求**，业务规则形同虚设。修法：死线 = 会话行 `created_at`（服务端写入，客户端无法伪造）+ 新常量 `INTERVIEW_DURATION_SECONDS`（`config.py`，默认 15 分钟，可用环境变量覆盖，验收脚本才能把一刻钟压成几秒）。判定落在**数据模型**层：`SessionSnapshot.interview_deadline()` / `is_timed_out()`（存储层零改动、**无需迁移**）。惰性兜底 `_enforce_interview_timeout()` **覆盖每一个会话入口**：`/api/chat`、`/api/skip_question`、`GET /api/interview/session`（刷新即结算）、`/api/interview/abandon`（到点后才点"放弃"记为 `timeout` 而非 `manual`）、`/api/generate_report`（**必须在判定 `ended_reason` 之前**跑，否则超时面试会被报告路径判成 `completed` + `finished`）、`/api/start_interview`（插入前释放，兑现 ADR-022R"不得把用户锁死在门外"）。到点后 `/api/chat` → **409 `interview_timeout`**（与 `no_active_session` 明确区分，附 `actions` + 会话摘要）；`GET /api/interview/session` 附加下发 `last_ended`（超时后 `session=null`，前端据此能说清"因超时已自动结束"，而不是"你没有任何面试"）；`/api/interview/config` 下发 `duration_seconds`、会话下发 `deadline_at`/`interview_remaining_seconds`（前端不再硬编码 15 分钟）。⚠️ **刻意不复用 `expires_at`（2h TTL）**：那是 ADR-022 的**锁卫生**上限，与"面试能答多久"是两个语义，压成一个字段必然二选一制造事故（要么允许答 2 小时，要么一次刷新就把面试作废）。**16 项测试**（`tests/test_interview_timeout_guard.py`；全套 516 → **532 项**）；**破坏性验证：11 个探针全部被抓住**。**交付物**：`scripts/verify_t28_manual.py`、`scripts/probes/probe_t28_timeout.py`、`docs/28-manual-verification.md` |
 
 > **⚠️ 操作教训（T-05 真机验证时踩到，务必记住）**
 > `job_kill` **只杀 pwsh 包装进程，不会杀 uvicorn 的 python 子进程**。残留进程会继续占着 8000 端口，导致：
@@ -300,7 +301,7 @@
 
 ---
 
-## 阶段 3 · Bug 修复 ✅ 进行中（T-23 ~ T-27 完成）
+## 阶段 3 · Bug 修复 ✅ 进行中（T-23 ~ T-28 完成）
 
 | ID | 类别 | 任务 | 工时 | 依赖 | 标记 |
 |---|---|---|---|---|---|
@@ -309,7 +310,7 @@
 | T-25 | **修复 Bug** | `start_interview` 唯一入口 + 过期行自愈 + 409 携带会话摘要（Bug 2） | 3h | T-24 | ✅ |
 | T-26 | **修复 Bug** | 报告改以**服务端会话**为准，前端不再传 `messages`（Bug 3A） | 3h | T-24 | ✅ |
 | T-27 | **修复 Bug** | 评分提示词区分"未及作答/答不上" + 报告新增 `ended_reason`（FR-4.5） | 3h | T-26 | ✅ |
-| T-28 | **修复 Bug** | 后端超时兜底：会话置 `abandoned`，**释放唯一锁**（FR-4.12） | 2h | T-19 | 🔒 |
+| T-28 | **修复 Bug** | 后端超时兜底：会话置 `abandoned`，**释放唯一锁**（FR-4.12） | 2h | T-19 | ✅ |
 | T-29 | **修复 Bug** | 修复 admin 启动竞态（`init_db.py` + `ExecStartPre`） | 2h | T-14 | 🔒 |
 | T-30 | **修复 Bug** | 管理员口令 env 注入 + `must_change_password` + 改密 CLI（ADR-017） | 3h | T-18 | 🔒 |
 | T-31 | **修复 Bug** | 审核状态与通知**同事务**（FR-8.3） | 2h | T-18 | 🔒 |

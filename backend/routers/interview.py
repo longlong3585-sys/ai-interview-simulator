@@ -27,7 +27,7 @@ from services.stores.factory import get_session_store
 from utils.ai_helpers import client, extract_json_from_response, generate_questions, clean_resume_text
 from utils.safe_json import safe_json_loads
 from database import User, InterviewRecord
-from config import MAX_FILE_SIZE
+from config import MAX_FILE_SIZE, INTERVIEW_DURATION_SECONDS
 
 router = APIRouter(prefix="/api", tags=["interview"])
 
@@ -50,6 +50,10 @@ logger = logging.getLogger("app.interview")
 # session_id 属于 T-24/T-25。
 
 #: 会话 TTL（架构 §6.3：2 小时）
+#
+# ⚠️ 与 `INTERVIEW_DURATION_SECONDS`（config.py）**不是一回事**（T-28）：
+# 这里是"这行数据还值不值得当成活跃会话"的锁卫生上限；
+# 那里是"这场面试还允许答题吗"的业务规则（15 分钟）。
 SESSION_TTL_SECONDS = 2 * 60 * 60
 
 UPLOAD_DIR = "uploads/avatars"
@@ -63,6 +67,111 @@ def _active_session(user_id: int) -> Optional[SessionSnapshot]:
     `get_active` 也不会返回它 —— 口径统一在存储层，路由不重复判断。
     """
     return get_session_store().get_active(user_id, utcnow_iso())
+
+
+# ===========================================================================
+# T-28 / FR-4.12：**超时兜底** —— 服务端自己掌握超时时刻
+# ===========================================================================
+#
+# 要修的 Bug（`docs/05-issues-backlog.md` Bug 3B）："15 分钟归零"原先只活在
+# 前端的一个倒计时里。前端锁定当然要做（T-42），但**锁定拦不住手工请求**：
+# 超时之后只要再发一次 `POST /api/chat`，服务端照样把这一轮记进会话
+# （会话仍 active），用户于是"超时了也能一直答下去"，业务规则形同虚设。
+#
+# 修法：把死线搬到服务端 —— 死线 = 会话行的 `created_at`（服务端写入，
+# 客户端无法伪造）+ `INTERVIEW_DURATION_SECONDS`。任何一次碰到该会话的请求
+# 都先做一次惰性判定（术语与 T-22 清理、T-25 自愈一致）：
+#
+#     到点且仍 active  ->  store.abandon(reason='timeout')  ->  释放唯一锁
+#
+# 为什么用惰性判定而不是只靠定时清理：
+#   * 定时器最小粒度是分钟级，用户点下去的那一瞬间必须**立即**被拦住；
+#   * 定时清理（`abandon_all_expired`）管的是 2 小时 TTL，与 15 分钟业务
+#     规则无关 —— 靠它兜底意味着超时后还能再答 1 小时 45 分钟。
+#
+# ⚠️ 为什么必须覆盖**每一个**会话入口（chat / skip / abandon / session /
+# report / start）：只拦住 chat，用户就能用 `generate_report` 把一场本该
+# 超时的面试当成"正常完成"（`ended_reason=completed`，状态 finished）。
+# 报告口径（T-27）与锁释放（T-25）都建立在"结束原因由服务端裁定"之上。
+#
+# 关于"不得把用户锁死在门外"（ADR-022R）：兜底**只置终态、不删行**，
+# 唯一锁随状态一起释放，所以下一行请求就能开新面试。
+
+
+def _enforce_interview_timeout(user_id: int,
+                               now: Optional[str] = None) -> Optional[SessionSnapshot]:
+    """超时兜底：到点就把该用户的活跃会话置 `abandoned`（`ended_reason=timeout`）。
+
+    返回
+    ----
+    `SessionSnapshot`
+        这一行**刚刚**（或由并发请求同时）因超时被结束 —— 调用方按超时处理
+        （写路径返回 409，读路径照常返回状态）。
+    `None`
+        没有超时会话，或活跃行是被**别的理由**结束的（用户点了放弃、
+        报告已正常生成）。此时交回调用方走各自的正常分支，不抢别人的语义。
+
+    并发：两个请求同时到点，只有一个 `abandon` 能成功（乐观锁），另一个
+    `applied=False` —— 那**不是**错误，锁已经释放、目的已达成，故只记日志。
+    """
+    now = now or utcnow_iso()
+    store = get_session_store()
+    snapshot = store.get_active(user_id, now)
+    if snapshot is None:
+        return None
+    if not snapshot.is_timed_out(now, INTERVIEW_DURATION_SECONDS):
+        return None
+
+    result = store.abandon(snapshot.session_id, snapshot.version,
+                           EndedReason.TIMEOUT, now)
+    if result.applied:
+        logger.info("超时兜底：会话 %s 已置 abandoned（ended_reason=timeout，"
+                    "user_id=%s）", snapshot.session_id, user_id)
+        return result.snapshot or snapshot
+
+    # 没写成有两种可能：① 并发请求刚改了 version（仍是 active）；
+    # ② 同一瞬间用户点了放弃 / 报告落库把它置成了终态。
+    # ① 用最新 version 重试一次（载荷只有"置终态"，重试是安全的，与
+    # `/interview/abandon` 同一策略）；② 则不越权改写别人的结束原因。
+    latest = result.snapshot or store.get(snapshot.session_id) or snapshot
+    if latest.is_active:
+        retry = store.abandon(latest.session_id, latest.version,
+                              EndedReason.TIMEOUT, now)
+        if retry.applied:
+            logger.info("超时兜底（重试成功）：会话 %s 已置 abandoned",
+                        latest.session_id)
+            return retry.snapshot or latest
+        latest = retry.snapshot or store.get(latest.session_id) or latest
+
+    if latest.ended_reason == EndedReason.TIMEOUT:
+        # 并发请求也在做同一件事 —— 语义一致，照常按超时处理。
+        return latest
+    logger.info("超时兜底跳过：会话 %s 已被以 %s 结束",
+                latest.session_id, latest.ended_reason)
+    return None
+
+
+def _ended_session_payload(snapshot: SessionSnapshot) -> dict:
+    """"刚刚结束的那一场"的摘要（T-28 附加下发）。
+
+    用途：超时兜底之后会话不再活跃（`GET /api/interview/session` 的
+    `session` 为 null），前端却必须能给出 FR-4.12 要求的**明确反馈**
+    （"因超时已自动结束"）并引导用户去出报告 —— 没有这个字段，前端只能
+    显示"你没有任何面试"，用户会以为进度丢了。
+
+    刻意不含 `report` 正文（可能很大）：只给 `has_report`，报告本身走
+    `POST /api/generate_report` 取。
+    """
+    return {
+        "session_id": snapshot.session_id,
+        "status": snapshot.status,
+        "ended_reason": snapshot.ended_reason,
+        "current_index": snapshot.current_index,
+        "total": len(snapshot.questions),
+        "created_at": snapshot.created_at,
+        "updated_at": snapshot.updated_at,
+        "has_report": bool(snapshot.report),
+    }
 
 
 def _no_session_response() -> JSONResponse:
@@ -110,6 +219,35 @@ def _session_conflict_response(existing=None) -> JSONResponse:
         # 复用读接口的摘要形状，前端一套代码就能渲染两个入口
         content["session"] = _session_payload(existing)
     return JSONResponse(status_code=409, content=content)
+
+
+def _timeout_response(snapshot: SessionSnapshot) -> JSONResponse:
+    """超时兜底后的 **409**（T-28 / FR-4.12）。
+
+    语义要点：
+      * `code` 与"没有活跃会话"（`no_active_session`）**必须区分开**：
+        前者是"时间到了"，后者是"你根本没在面试"。前端要给出的提示
+        完全不同（FR-4.12 第 ③ 条："明确反馈'因超时已自动结束'"）。
+      * `ended_reason=timeout` 一并下发，让前端不必猜自己是被哪种方式结束的；
+      * `actions` 给出**两条出路**：去出报告（T-27 的口径）、开新面试
+        （ADR-022R：超时不得把用户锁死在门外）；
+      * `detail` 保持**字符串** —— 前端是 `detail || 默认文案` 直接渲染的。
+    """
+    return JSONResponse(
+        status_code=409,
+        content={
+            "detail": "本场面试已超时自动结束，请开始一场新的面试",
+            "code": "interview_timeout",
+            "ended_reason": EndedReason.TIMEOUT,
+            "hint": "面试时长上限为 %d 分钟；到点后由**服务端**自动结束会话，"
+                    "因此超时后无法再继续答题。已答部分仍可生成报告"
+                    "（按超时口径评分，未及作答的题不扣分），"
+                    "也可以立刻重新开始一场新的面试。"
+                    % max(1, INTERVIEW_DURATION_SECONDS // 60),
+            "actions": ["generate_report", "start_interview"],
+            "session": _session_payload(snapshot),
+        },
+    )
 
 
 def _version_conflict_response(latest: Optional[SessionSnapshot]) -> JSONResponse:
@@ -233,9 +371,15 @@ def get_interview_config(current_user: User = Depends(get_current_user)):
 
     需要登录（不在 §3.1 的公开白名单内）—— 这些常量只服务于面试流程，
     而面试流程本身就必须登录。
+
+    T-28：新增 `duration_seconds`。前端的 15 分钟倒计时原本硬编码在
+    `App.tsx`（`setTimeLeft(15 * 60)`），服务端改了时长它也不知道 ——
+    两边一旦不一致，就会出现"前端已经锁 UI，服务端说还能答"这类
+    互相矛盾的表现。**服务端是唯一来源**，前端只负责展示。
     """
     return {
         "skip_words": list(SKIP_WORDS),
+        "duration_seconds": INTERVIEW_DURATION_SECONDS,
     }
 
 
@@ -248,6 +392,14 @@ async def chat(req: ChatRequest, current_user: User = Depends(require_user)):
     # 修复前该接口无任何鉴权依赖，且用客户端自报的 user_id 取会话，
     # 导致未登录即可调用（白嫖 AI 额度）并读写他人的面试会话（串号）。
     # T-23：会话改为从持久化存储按 user_id 解析成 **session_id**。
+    # T-28 / FR-4.12：先做超时兜底（服务端自己掌握超时时刻）。
+    # 顺序很重要 —— 必须先兜底再取活跃会话：兜底把会话置终态后
+    # `_active_session` 就返回 None，若顺序反过来会误报"你没有在面试"，
+    # 用户看到的提示就从"因超时已自动结束"退化成"请先开始面试"。
+    timed_out = _enforce_interview_timeout(current_user.id)
+    if timed_out is not None:
+        return _timeout_response(timed_out)
+
     snapshot = _active_session(current_user.id)
     if snapshot is None:
         # 修复前这里会掉进下面的"通用 AI 对话"分支 ——
@@ -372,6 +524,15 @@ async def start_interview(
         logger.info("start_interview 自愈了 %d 条过期会话（user_id=%s）",
                     healed, current_user.id)
 
+    # T-28 / FR-4.12：业务死线（15 分钟）同样要在插入前释放，
+    # 否则"超时后想重开"的用户会撞上 409 —— 那正是 ADR-022R 明令禁止的
+    # "把用户锁死在门外"。（`abandon_expired_for_user` 只管 2 小时 TTL，
+    # 不覆盖 15 分钟的业务规则。）
+    timed_out = _enforce_interview_timeout(current_user.id, now)
+    if timed_out is not None:
+        logger.info("start_interview 前释放了超时会话 %s（user_id=%s）",
+                    timed_out.session_id, current_user.id)
+
     draft = SessionDraft(
         session_id=uuid.uuid4().hex,
         user_id=current_user.id,
@@ -410,6 +571,12 @@ async def start_interview(
 @router.post("/skip_question")
 async def skip_question(current_user: User = Depends(require_user)):
     user_id = current_user.id
+
+    # T-28：跳过也是"写入会话"的一条路径，同样必须被超时兜底拦住。
+    timed_out = _enforce_interview_timeout(user_id)
+    if timed_out is not None:
+        return _timeout_response(timed_out)
+
     snapshot = _active_session(current_user.id)
     if snapshot is None:
         # 修复前这里返回 400 —— 但"没有进行中的面试"是**状态冲突**而非参数错误，
@@ -463,6 +630,20 @@ def _session_payload(snapshot: SessionSnapshot) -> dict:
         remaining = max(0, int((exp - datetime.datetime.utcnow()).total_seconds()))
     except (ValueError, TypeError):
         pass
+
+    # T-28：把**业务死线**也下发（与上面的 2 小时 TTL 区分开）。
+    # 前端 T-42 的倒计时应当以这个时刻为准，而不是在前端硬编码 15 分钟 ——
+    # 否则服务端改了时长，前端还按老时长锁 UI，两边会各说各话。
+    deadline_at = snapshot.interview_deadline(INTERVIEW_DURATION_SECONDS)
+    interview_remaining = None
+    if deadline_at is not None:
+        try:
+            dl = datetime.datetime.fromisoformat(deadline_at)
+            interview_remaining = max(
+                0, int((dl - datetime.datetime.utcnow()).total_seconds()))
+        except (ValueError, TypeError):
+            pass
+
     return {
         "session_id": snapshot.session_id,
         "role": snapshot.role,
@@ -477,6 +658,9 @@ def _session_payload(snapshot: SessionSnapshot) -> dict:
         "created_at": snapshot.created_at,
         "expires_at": snapshot.expires_at,
         "remaining_seconds": remaining,
+        "duration_seconds": INTERVIEW_DURATION_SECONDS,
+        "deadline_at": deadline_at,
+        "interview_remaining_seconds": interview_remaining,
     }
 
 
@@ -492,9 +676,23 @@ def get_interview_session(current_user: User = Depends(require_user)):
     **无会话时返回 200 + null，而不是 404/409** —— 这是正常的业务状态
     （用户就是没在面试），不是错误。前端据此决定显示"开始面试"还是
     "继续上次面试"。
+
+    T-28 补两件事：
+      1. 读之前先做**超时兜底** —— 刷新页面本身就是"意识到超时"的最早时机，
+         让 GET 自愈可以把"前端被挂起/断网，倒计时没跑到点"这一类的超时
+         也在用户回来时立刻结算，而不是拖到下一次写请求；
+      2. 附加下发 `last_ended`（最近结束的一场）—— 超时兜底后 `session`
+         必然是 null，前端若无从知道"刚刚那场是因超时结束的"，就只能显示
+         "你没有任何面试"，用户会以为进度丢了（FR-4.12 第 ③ 条要的是
+         **明确反馈**，不是沉默）。
     """
+    _enforce_interview_timeout(current_user.id)
     snapshot = _active_session(current_user.id)
-    return {"session": _session_payload(snapshot) if snapshot else None}
+    ended = get_session_store().get_last_ended(current_user.id)
+    return {
+        "session": _session_payload(snapshot) if snapshot else None,
+        "last_ended": _ended_session_payload(ended) if ended else None,
+    }
 
 
 @router.post("/interview/abandon")
@@ -512,6 +710,22 @@ def abandon_interview_session(current_user: User = Depends(require_user)):
       * 乐观锁冲突时**重试一次**：用户点"放弃"的意图很明确，不该因为并发
         被无声拒绝（重试是安全的 —— 载荷只有"置终态"，不含任何可能陈旧的内容）。
     """
+    # T-28 / FR-4.12：先做超时兜底。用户在半分钟前就已经到点了（只是前端
+    # 还在等他点），这次点击的**真实原因**是超时，不是"主动放弃" ——
+    # `ended_reason` 必须如实写成 `timeout`（评分口径 T-27 就依赖它）。
+    # 兜底成功后用户的意图（"结束这场、让我重开"）已经达成，故回 200 而不是
+    # 409：他不是做了错事，只是慢了一步。
+    timed_out = _enforce_interview_timeout(current_user.id)
+    if timed_out is not None:
+        return {
+            "success": True,
+            "abandoned_session_id": timed_out.session_id,
+            "status": timed_out.status,
+            "ended_reason": timed_out.ended_reason or EndedReason.TIMEOUT,
+            "hint": "本场面试已因超时自动结束（与主动放弃等效：锁已释放），"
+                    "你现在可以立刻开始一场新的面试。",
+        }
+
     snapshot = _active_session(current_user.id)
     if snapshot is None:
         return _no_session_response()
@@ -653,7 +867,14 @@ async def generate_report(current_user: User = Depends(require_user)):
          才是主动放弃，照常计分。零作答超时不得当作"全错给全 0"。
 
     `ended_reason` 与两个计数由**服务端**写入，不采信模型输出（也不接受客户端自报）。
+
+    T-28 补一层：**兜底必须在判定 `ended_reason` 之前跑**。否则到点后还没被
+    兜底的那一瞬间来出报告，`_report_target` 会看到一行仍 `active` 的会话，
+    把这场超时的面试判成 `completed`（状态还写成 finished）—— 正是 T-27
+    要消除的"超时说成正常完成"。兜底先把它置成 `abandoned + timeout`，
+    报告路径才会走 `attach_report`（状态保持 abandoned，口径按超时）。
     """
+    _enforce_interview_timeout(current_user.id)
     target = _report_target(current_user.id)
     if target is None:
         # 与 /api/chat 同口径：没有可评的面试就没有报告可评。
