@@ -524,6 +524,49 @@
 
 ---
 
+## 📦 发布前整理（归档，2026-09-30）
+
+T-51 收口后做了一次**纯文件系统整理**（不改任何业务逻辑），为进入 T-52/T-53 部署阶段做准备。
+
+| 类别 | 去处 | 数量 |
+|---|---|---|
+| 历史验收脚本（`verify_tXX*.py`、`probe_t15r.py`、`smoke_t15.py`） | `backend/scripts/archive/` | 21 |
+| 破坏性探针 | `backend/scripts/archive/probes/` | 12 |
+| 历史验收/评审文档（`*manual-verification.md`、`t15r-verification.md`、`17/18/19-*.md`、`*-review.md`） | `docs/archive/` | 18 |
+
+**本文件中出现的 `scripts/verify_tXX*.py` / `scripts/probes/...` /
+`docs/XX-manual-verification.md` 路径均指归档前的位置** ——
+那些是当时的交付记录，保留原样以便追溯；实际位置请自行加上 `archive/`。
+
+留在 `scripts/` 根目录的是**被生产代码或测试引用**的脚本（判据：
+"移走之后一切都还能跑"）：`cleanup.py`（systemd `ExecStart` + 测试 import）、
+`migrate.py`、`make_backup.py`（`migrations/runner.py` import）、
+`verify_backup.py`（`tests/test_backup_tools.py` import）、`db_health.py`、`journal_mode.py`。
+明细见 `backend/scripts/archive/README.md`。
+
+**归档脚本仍然可运行**：给每个脚本加了一行字面量路径
+（`_ARCHIVE_REPO` = 四层 `dirname(__file__)` = 仓库根），归档位置与原地位置都算得对。
+
+**整理后回归（实测）**：后端 `Ran 597 tests OK`、前端 `117 pass / 0 fail`、`tsc -b` exit 0；
+`verify_t50_manual.py` 与 `verify_t51_manual.py` 从 `backend/` 与仓库根**两个位置**都能跑通
+（退出码 0），早期脚本 `verify_t21.py` 亦 19/19 通过（退出码 0）。
+
+> ⚠️ **过程留档（值得继承的教训）**：整理脚本本身翻车八次，每次都换一种坏法 ——
+> ① 用"行首是 import"定位插入点（docstring 正文里正好有一行以 import 开头）⇒ 插进字符串；
+> ② `lstrip()` 顺手重排空行 ⇒ 改掉缩进语境；③ 手写引号扫描 ⇒ 三引号串里嵌套引号时错位；
+> ④ helper 追加到文件末尾 ⇒ 模块顶层先调用（`def` 是执行到才绑定名字）⇒ `NameError`；
+> ⑤ 插在 `from __future__` 之前 ⇒ `SyntaxError`；⑥ 用"目录名含 backend"当标记 ⇒
+> 在仓库根提前命中；⑦ 用正则匹配 docstring ⇒ 结束三引号前后无空白时匹配不到；
+> ⑧ 整理脚本自己的 docstring 里有 `\A` ⇒ 非 raw 字符串把 `\A` 当转义 ⇒ 自己语法错误。
+> 其中第 7 版最危险：**把文件截断成 51 行却仍返回退出码 0**（静默破坏）。
+> 最终采用的是最笨也最稳的写法：**锚在要改的那一行字面量上**，
+> 并断言"把插入与替换还原回去后与原文**逐字节相同**"，不满足就**不写盘**。
+>
+> 结论：**整理脚本不要试图理解代码结构**；判据越简单越安全，
+> 并且必须有"要么完全正确、要么什么都不做"的硬保证。
+
+---
+
 ## 下一步
 
 **本清单待你验收。** 确认后：

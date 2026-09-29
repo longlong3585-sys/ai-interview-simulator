@@ -65,7 +65,13 @@ import shutil
 import subprocess
 import sys
 
-REPO_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import os as _archive_os
+
+# 归档位置：backend/scripts/archive/<本文件> —— 四层 dirname 即仓库根。
+_ARCHIVE_REPO = _archive_os.path.dirname(_archive_os.path.dirname(
+    _archive_os.path.dirname(_archive_os.path.dirname(
+        _archive_os.path.abspath(__file__)))))
+REPO_DIR = _ARCHIVE_REPO
 FRONTEND_DIR = os.path.join(REPO_DIR, "frontend")
 SRC_DIR = os.path.join(FRONTEND_DIR, "src")
 TESTS_DIR = os.path.join(FRONTEND_DIR, "tests")

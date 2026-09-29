@@ -27,7 +27,13 @@ import sys
 import urllib.error
 import urllib.request
 
-BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+import os as _archive_os
+
+# 归档位置：backend/scripts/archive/<本文件> —— 四层 dirname 即仓库根。
+_ARCHIVE_REPO = _archive_os.path.dirname(_archive_os.path.dirname(
+    _archive_os.path.dirname(_archive_os.path.dirname(
+        _archive_os.path.abspath(__file__)))))
+BACKEND_DIR = os.path.join(_ARCHIVE_REPO, "backend")
 if BACKEND_DIR not in sys.path:
     sys.path.insert(0, BACKEND_DIR)
 
