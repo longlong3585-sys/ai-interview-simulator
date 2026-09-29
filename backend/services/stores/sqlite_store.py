@@ -195,6 +195,27 @@ class SQLiteSessionStore(object):
         finally:
             s.close()
 
+    def get_last_ended(self, user_id: int) -> Optional[SessionSnapshot]:
+        """最近结束（finished / abandoned）的一场；T-27 的超时报告入口。
+
+        排序键是 `updated_at`（终态行上它就是"结束时刻"），`created_at` 仅作
+        兜底 tie-break —— SQLite 的 ISO 文本按字典序比较即等于按时间比较
+        （`base.py` 的时间契约），所以不需要 `datetime()` 转换。
+        """
+        s = self._session()
+        try:
+            row = s.execute(
+                text(
+                    "SELECT %s FROM interview_sessions "
+                    "WHERE user_id = :uid AND status <> :active "
+                    "ORDER BY updated_at DESC, created_at DESC LIMIT 1" % _COLUMNS
+                ),
+                {"uid": user_id, "active": SessionStatus.ACTIVE},
+            ).fetchone()
+            return self._to_snapshot(row) if row else None
+        finally:
+            s.close()
+
     # ------------------------------------------------------------------
     # 自愈
     # ------------------------------------------------------------------
@@ -352,6 +373,41 @@ class SQLiteSessionStore(object):
                     "sid": session_id,
                     "expected": expected_version,
                     "active": SessionStatus.ACTIVE,
+                },
+            )
+            s.commit()
+            return CommitResult(applied=bool(changed),
+                                snapshot=self._fetch(s, session_id))
+        finally:
+            s.close()
+
+    def attach_report(self, session_id: str, expected_version: int,
+                      report_json: str, now: str) -> CommitResult:
+        """给已 `abandoned` 的会话补写报告（T-27 / ADR-007R），**不碰 status**。
+
+        与 `finish` 的唯一区别就是"不写 status / ended_reason"：
+        ended_reason 在超时那一刻（`abandon` / `abandon_all_expired` /
+        `abandon_expired_for_user`）就已经写好了，这里**不该也不允许**改写它 ——
+        报告是事后的评分结果，不是结束原因。
+
+        `report IS NULL` 与 `version = :expected` 一起构成防覆盖 + 乐观锁：
+        并发的两次报告请求只有一个能写进去，另一个拿到 `applied=False`。
+        """
+        s = self._session()
+        try:
+            begin_write(s)   # T-15 修订：写路径显式取写锁
+            changed = self._guarded_update(
+                s,
+                "UPDATE interview_sessions "
+                "SET report = :report, version = version + 1, updated_at = :now "
+                "WHERE session_id = :sid AND version = :expected "
+                "  AND status = :abandoned AND report IS NULL",
+                {
+                    "report": report_json,
+                    "now": now,
+                    "sid": session_id,
+                    "expected": expected_version,
+                    "abandoned": SessionStatus.ABANDONED,
                 },
             )
             s.commit()

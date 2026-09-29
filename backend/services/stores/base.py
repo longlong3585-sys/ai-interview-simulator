@@ -62,11 +62,24 @@ from typing import Any, List, Optional, Protocol, runtime_checkable
 
 
 class SessionStatus(object):
-    """会话状态机（ADR-022）。
+    """会话状态机（ADR-022 + ADR-007R）。
 
         active ──报告生成成功──────────▶ finished   （释放唯一锁）
            │
            ├──超时 / 用户放弃 / TTL 到期──▶ abandoned （释放唯一锁）
+           │                                   │
+           │                                   └──仍可补写报告（T-27）──▶ report 非空
+           └──（abandoned 不会被"提升"为 finished）
+
+    关于 `abandoned` 之后仍能带报告（v2.4 / ADR-007R）：报告与状态是**两个正交的
+    事实** ——
+      * `status` 说明这场面试**怎么结束的**（正常完成 / 超时 / 用户放弃）；
+      * `report` 说明评分**算过没有**。
+
+    超时面试按 ADR-022R 必须是 `abandoned`（"面试并未正常完成"），
+    但按 ADR-007R 又**必须出报告**。若为了写报告把状态改成 `finished`，
+    库里就会出现"用户从未完成的面试被记成已完成"，状态语义被报告路径污染。
+    因此 `abandoned + report` 是一个**合法组合**，原因由 `ended_reason` 承载。
     """
 
     ACTIVE = "active"
@@ -343,6 +356,25 @@ class SessionStore(Protocol):
         """
         ...
 
+    def get_last_ended(self, user_id: int) -> Optional[SessionSnapshot]:
+        """取该用户**最近结束**（`finished` / `abandoned`）的会话；没有返回 `None`。
+
+        T-27 新增。存在的理由是一条**硬需求**：ADR-007R 裁决"超时仍要出报告"，
+        而超时后会话已经是 `abandoned` —— `get_active()` 永远取不到它，
+        报告就无从生成（这正是"超时不出报告"在存储层的根因）。
+
+        与 `get_active` 的分工：
+          * `get_active` 回答"**现在**在面试吗"（只认未过期的 active）；
+          * `get_last_ended` 回答"**刚刚**那场面试是怎么结束的"。
+
+        排序 `updated_at DESC, created_at DESC`：终态行的 `updated_at` 就是
+        它结束的时刻，这才是"最近结束"；按 `created_at` 取到的是"最近开始"。
+
+        注意：**不**按"有没有报告"过滤 —— "这场面试要不要出报告"是业务判断，
+        属调用方；存储层只如实返回最近结束的那一行。
+        """
+        ...
+
     # ---------------- 自愈（ADR-022 R-10）----------------
 
     def abandon_expired_for_user(self, user_id: int, now: str) -> int:
@@ -385,6 +417,27 @@ class SessionStore(Protocol):
         AI 评分必须在**事务外**完成；本方法只做"报告落库 + 置终态 + version+1"
         这一个短事务，二者必须同事务（ADR-004 事务边界）。
         `ended_reason` 取 `EndedReason.ALL` 之一。
+        """
+        ...
+
+    def attach_report(self, session_id: str, expected_version: int,
+                      report_json: str, now: str) -> CommitResult:
+        """给**已经结束**（`abandoned`）的会话补写报告，**不改状态**（T-27）。
+
+        为什么不能复用 `finish()`：`finish` 会把状态置为 `finished`，而 ADR-022R
+        明确裁决"超时 → `abandoned`，**不是** `finished`（面试并未正常完成）"。
+        借用 `finish` 落库报告，等于用报告路径污染状态语义。
+
+        为什么必须有它：ADR-007R 要求"超时仍要出报告"，此时会话已是 `abandoned`。
+        报告与状态是**两个正交的事实**（见 `SessionStatus` 说明）。
+
+        条件：`session_id = :sid AND version = :expected AND status = 'abandoned'
+        AND report IS NULL`；成功时 `version = version + 1`。
+
+        `report IS NULL` 是**防覆盖**守卫：报告一旦写出就不再重写
+        （重算一次要多花一次 AI 调用，而且会覆盖用户已经看过的结论）。
+        `applied=False` 表示条件不满足，调用方返回 409 / 复用已有报告，
+        **不得重试写**。
         """
         ...
 

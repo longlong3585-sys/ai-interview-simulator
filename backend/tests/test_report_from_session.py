@@ -74,8 +74,16 @@ class ReportHarness(unittest.TestCase):
                                 data={"role": "后端开发", "questions_json": questions})
 
     def answer(self, text, seq=None):
-        return self.client.post("/api/chat", headers=self.h,
-                                json={"message": text})
+        """作答一轮；**连面试官的 AI 调用一并 mock 掉**。
+
+        `/api/chat` 每轮都会真的去调 DeepSeek。不 mock 的话：每个用例都在
+        产生真实网络请求与费用，离线时整批"失败"——那是测试依赖外部服务，
+        而不是代码有问题，两者必须分清（本文件首版就是漏了这一处）。
+        """
+        with patch("routers.interview.client.chat.completions.create",
+                   side_effect=lambda **k: _FakeResponse("【假面试官】收到，请继续。")):
+            return self.client.post("/api/chat", headers=self.h,
+                                    json={"message": text})
 
     def generate(self, payload=None):
         """调用 generate_report，并把喂给 AI 的 prompt 抓下来。"""
@@ -171,8 +179,9 @@ class SessionIsTheSourceOfTruthTests(ReportHarness):
     def test_no_body_required(self):
         self.start()
         self.answer("答")
-        r = self.client.post("/api/generate_report", headers=self.h)
-        self.assertIn(r.status_code, (200, 503), r.text)
+        r = self.generate()          # 走 mock，别真去调 DeepSeek
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertIn("overall_score", r.json())
 
 
 class ReportPersistenceTests(ReportHarness):

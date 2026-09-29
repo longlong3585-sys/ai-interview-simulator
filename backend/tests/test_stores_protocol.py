@@ -191,11 +191,14 @@ class ProtocolCompletenessTests(unittest.TestCase):
             "get": ["session_id"],
             "get_active": ["user_id", "now"],
             "find_replay": ["session_id", "seq"],
+            "get_last_ended": ["user_id"],
             "abandon_expired_for_user": ["user_id", "now"],
             "create": ["draft"],
             "commit_turn": ["commit"],
             "finish": ["session_id", "expected_version", "report_json",
                        "ended_reason", "now"],
+            "attach_report": ["session_id", "expected_version", "report_json",
+                              "now"],
             "abandon": ["session_id", "expected_version", "ended_reason", "now"],
             "abandon_all_expired": ["now"],
         },
@@ -253,11 +256,14 @@ class DuckTypingTests(unittest.TestCase):
             def get(self, session_id): return None
             def get_active(self, user_id, now): return None
             def find_replay(self, session_id, seq): return None
+            def get_last_ended(self, user_id): return None
             def abandon_expired_for_user(self, user_id, now): return 0
             def create(self, draft): return None
             def commit_turn(self, commit): return CommitResult(applied=False)
             def finish(self, session_id, expected_version, report_json,
                        ended_reason, now): return CommitResult(applied=False)
+            def attach_report(self, session_id, expected_version, report_json,
+                              now): return CommitResult(applied=False)
             def abandon(self, session_id, expected_version, ended_reason,
                         now): return CommitResult(applied=False)
             def abandon_all_expired(self, now): return 0

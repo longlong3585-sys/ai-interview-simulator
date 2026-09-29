@@ -560,5 +560,124 @@ class RawStorageTests(StoreHarness):
         self.assertEqual(row[2], "completed")
 
 
+class TimeoutReportTests(StoreHarness):
+    """T-27 补的两个方法：超时后仍要能出报告，且**不能**把状态改成 finished。
+
+    ADR-007R（超时仍出报告）与 ADR-022R（超时必须是 abandoned、不是 finished）
+    这两条要求是**同时**成立的，靠的就是"报告与状态是两个正交事实"这个设计。
+    """
+
+    def _timeout(self, session_id="s1", ttl=-60):
+        """造一场"已超时并已被自愈为 abandoned"的会话（真实代码路径）。"""
+        snap = self.make_session(session_id=session_id, ttl=ttl)
+        now = utcnow_iso()
+        n = self.store.abandon_expired_for_user(self.uid, now)
+        self.assertEqual(n, 1, "过期行自愈应当命中 1 行")
+        return self.store.get(session_id)
+
+    # ---------------- get_last_ended ----------------
+
+    def test_get_last_ended_is_none_without_any_session(self):
+        self.assertIsNone(self.store.get_last_ended(self.uid))
+
+    def test_active_session_is_not_last_ended(self):
+        """进行中的会话不算"已结束" —— 两个方法的分工不能混。"""
+        self.make_session()
+        self.assertIsNone(self.store.get_last_ended(self.uid))
+        self.assertIsNotNone(self.store.get_active(self.uid, utcnow_iso()))
+
+    def test_returns_the_timed_out_session(self):
+        """**T-27 的根因用例**：超时后 `get_active` 取不到，`get_last_ended` 必须能。
+
+        修复前少了这个方法，`generate_report` 在超时后只能返回 409 ——
+        ADR-007R 的"超时仍要出报告"就落不了地。
+        """
+        dead = self._timeout()
+        self.assertIsNone(self.store.get_active(self.uid, utcnow_iso()),
+                          "超时后不应再有活跃会话")
+        last = self.store.get_last_ended(self.uid)
+        self.assertIsNotNone(last, "超时会话必须能被取到，否则永远出不了报告")
+        self.assertEqual(last.session_id, dead.session_id)
+        self.assertEqual(last.status, SessionStatus.ABANDONED)
+        self.assertEqual(last.ended_reason, EndedReason.TIMEOUT)
+
+    def test_returns_the_most_recently_ended_one(self):
+        """按**结束时刻**取，不是按创建时刻。"""
+        self._timeout("old")
+        self._timeout("new")
+        self.assertEqual(self.store.get_last_ended(self.uid).session_id, "new")
+
+    def test_finished_session_is_also_last_ended(self):
+        snap = self.make_session()
+        self.store.finish("s1", snap.version, '{"a":1}', EndedReason.COMPLETED,
+                          utcnow_iso())
+        last = self.store.get_last_ended(self.uid)
+        self.assertEqual(last.status, SessionStatus.FINISHED)
+
+    def test_does_not_leak_another_users_session(self):
+        self._timeout()
+        with self.engine.begin() as conn:
+            conn.execute(text(
+                "INSERT INTO users (username, email, role, is_active) "
+                "VALUES ('t27other', 'o@x.y', 'user', 1)"))
+        other = self.raw("SELECT id FROM users WHERE username='t27other'")[0][0]
+        self.assertIsNone(self.store.get_last_ended(other),
+                          "不能把别人的会话当成自己的最近一场")
+
+    # ---------------- attach_report ----------------
+
+    def test_attach_report_writes_report_but_keeps_abandoned(self):
+        """**核心不变量**：报告落库了，状态仍然是 abandoned（不是 finished）。"""
+        dead = self._timeout()
+        res = self.store.attach_report("s1", dead.version, '{"overall_score": 0.0}',
+                                       utcnow_iso())
+        self.assertTrue(res.applied)
+        row = self.raw("SELECT report, status, ended_reason, version "
+                       "FROM interview_sessions WHERE session_id='s1'")[0]
+        self.assertEqual(row[0], '{"overall_score": 0.0}')
+        self.assertEqual(row[1], SessionStatus.ABANDONED,
+                         "写报告把超时会话变成了 finished —— ADR-022R 被违反")
+        self.assertEqual(row[2], EndedReason.TIMEOUT,
+                         "ended_reason 不该被报告路径改写")
+        self.assertEqual(row[3], dead.version + 1)
+
+    def test_attach_report_refuses_to_overwrite_an_existing_report(self):
+        """报告一旦写出就不再重写：重算要多花一次 AI 调用，还会覆盖用户看过的结论。"""
+        dead = self._timeout()
+        self.assertTrue(self.store.attach_report(
+            "s1", dead.version, '{"n":1}', utcnow_iso()).applied)
+        again = self.store.attach_report("s1", dead.version + 1, '{"n":2}',
+                                         utcnow_iso())
+        self.assertFalse(again.applied)
+        self.assertEqual(self.raw("SELECT report FROM interview_sessions "
+                                  "WHERE session_id='s1'")[0][0], '{"n":1}')
+
+    def test_attach_report_uses_optimistic_lock(self):
+        """拿着陈旧 version 的并发请求不能写进去。"""
+        dead = self._timeout()
+        stale = self.store.attach_report("s1", dead.version - 1, '{"n":1}',
+                                        utcnow_iso())
+        self.assertFalse(stale.applied)
+
+    def test_attach_report_refuses_active_session(self):
+        """`active` 会话必须走 `finish()` —— 否则会造出"进行中却有报告"的怪状态。"""
+        snap = self.make_session()
+        res = self.store.attach_report("s1", snap.version, '{"n":1}', utcnow_iso())
+        self.assertFalse(res.applied)
+        self.assertEqual(self.raw("SELECT report, status FROM interview_sessions "
+                                  "WHERE session_id='s1'")[0][0], None)
+
+    def test_attach_report_does_not_release_or_take_any_lock(self):
+        """超时行本来就已是终态；补报告不该影响"用户能立刻开新面试"。"""
+        dead = self._timeout()
+        self.store.attach_report("s1", dead.version, '{"n":1}', utcnow_iso())
+        fresh = self.make_session(session_id="s2")
+        self.assertEqual(fresh.session_id, "s2")
+
+    def test_attach_report_unknown_session_is_not_applied(self):
+        res = self.store.attach_report("nope", 1, '{"n":1}', utcnow_iso())
+        self.assertFalse(res.applied)
+
+
 if __name__ == "__main__":
     unittest.main()

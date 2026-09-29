@@ -129,14 +129,56 @@ def _version_conflict_response(latest: Optional[SessionSnapshot]) -> JSONRespons
     )
 
 
-def _finish_session(snapshot: Optional[SessionSnapshot], report) -> None:
-    """评分成功后把会话置为 `finished` 并落库报告（ADR-004 报告路径）。
+def _stamp_server_facts(result: dict, ended_reason: str, counts: dict) -> None:
+    """把**只有服务端才知道的事实**写进报告，覆盖模型输出（T-27）。
 
-    乐观锁冲突时**重试一次**（用最新 version）。这里的重试是安全的，
-    与 `/api/chat` 的"绝不重试"不矛盾：chat 的载荷是基于旧快照算出的
-    `user_answers` 整列，重放会**串题**；而报告只取决于刚生成的评分结果，
-    不随 version 变化。重试的目的是确保**锁一定被释放** ——
-    否则用户会被自己的会话锁到 TTL 结束。
+    为什么必须覆盖，而不是"在提示词里请模型照抄"：
+      * `ended_reason` 模型根本无从知道 —— 它看不到会话是怎么结束的；
+      * `answered_count` / `total_questions` 是会话上的客观事实。让模型自己数，
+        就会出现"报告说答了 3 题、会话里只有 2 题"这种自相矛盾的展示，
+        而这正是 FR-4.5 要消除的"误导"。
+
+    另外，ADR-007R 的"超时且零作答时不得当作全错"**不能只靠提示词**：
+    模型偶尔不遵守，就会原样复现"误导性 0 分"。既然这是一条 MUST，
+    就该由服务端兜底保证 —— 这里做的是**补标注**，不是改分数
+    （分数只有模型能给，服务端不越权编造）。
+
+    条件比 ADR 原文**更窄**一处：ADR 写"`ended_reason='timeout'` 且
+    `answered_count=0`"，这里额外要求 `skipped=0`。因为"全部主动跳过"
+    也是 answered_count=0，但那是候选人**明确拒绝回答**，给它贴上
+    "未及作答，无法评分"就成了反向误导（把放弃说成没机会）。
+    """
+    result["ended_reason"] = ended_reason
+    result["answered_count"] = counts["answered"]
+    result["total_questions"] = counts["total"]
+
+    if ended_reason == EndedReason.TIMEOUT and not counts["answered"] \
+            and not counts["skipped"]:
+        marker = "未及作答，无法评分"
+        already = "%s %s" % (result.get("details") or "",
+                             result.get("suggestion") or "")
+        if marker not in already:
+            result["details"] = (
+                "%s：本次面试因超时自动结束，在收到任何回答之前就已结束，"
+                "以下各分项分数**不代表**对候选人的负面评价。\n%s"
+                % (marker, result.get("details") or "")
+            ).rstrip()
+
+
+def _persist_report(snapshot: Optional[SessionSnapshot], report) -> None:
+    """把评分结果落库。两条路径，取决于会话现在是死是活（T-27）。
+
+    * 会话仍是 `active` → `finish()`：置 `finished` + 写报告（**同事务**，
+      ADR-004 报告路径）。这一步同时释放唯一锁，不做的话用户会被自己的
+      会话锁到 TTL 结束（2 小时）。
+    * 会话已是 `abandoned`（超时 / 用户放弃）→ `attach_report()`：
+      **只写报告，不动状态**。ADR-022R 裁决"超时 → `abandoned`，不是
+      `finished`（面试并未正常完成）"，报告不能反过来污染状态语义。
+
+    两条路径都在乐观锁冲突时**重试一次**（用最新 version），确保不会留下
+    "评了分却没落库"。与 `/api/chat` 的"绝不重试写"不矛盾：chat 的载荷是
+    基于旧快照算出的 `user_answers` 整列，重放会**串题**；而报告只取决于
+    刚生成的评分结果，不随 version 变化。
 
     **失败不抛出**：报告已经生成好了，不能因为落库失败就让用户拿不到结果。
     """
@@ -145,13 +187,23 @@ def _finish_session(snapshot: Optional[SessionSnapshot], report) -> None:
     store = get_session_store()
     payload = json.dumps(report, ensure_ascii=False)
     try:
-        result = store.finish(snapshot.session_id, snapshot.version, payload,
-                              EndedReason.COMPLETED, utcnow_iso())
-        if not result.applied:
-            latest = store.get(snapshot.session_id)
-            if latest is not None and latest.is_active:
-                store.finish(latest.session_id, latest.version, payload,
-                             EndedReason.COMPLETED, utcnow_iso())
+        if snapshot.is_active:
+            result = store.finish(snapshot.session_id, snapshot.version, payload,
+                                  EndedReason.COMPLETED, utcnow_iso())
+            if not result.applied:
+                latest = store.get(snapshot.session_id)
+                if latest is not None and latest.is_active:
+                    store.finish(latest.session_id, latest.version, payload,
+                                 EndedReason.COMPLETED, utcnow_iso())
+        else:
+            result = store.attach_report(snapshot.session_id, snapshot.version,
+                                         payload, utcnow_iso())
+            if not result.applied:
+                latest = store.get(snapshot.session_id)
+                if latest is not None and not latest.is_active \
+                        and not latest.report:
+                    store.attach_report(latest.session_id, latest.version,
+                                        payload, utcnow_iso())
     except StoreError as exc:
         logger.warning("报告落库/置终态失败（会话 %s）：%s",
                        snapshot.session_id, exc)
@@ -523,39 +575,137 @@ def _build_transcript(snapshot: SessionSnapshot):
     return "\n".join(lines), len(snapshot.questions)
 
 
+def _answer_counts(snapshot: SessionSnapshot):
+    """按**服务端会话**统计各状态的题数（T-27）。
+
+    这三个数是要显示给用户、并写进报告的**事实**，不能交给模型去数
+    （T-26 的教训：凡是服务端已经知道的事实，就不要让模型猜）。
+    缺失的状态一律按 `pending` 处理 —— 与 `_build_transcript` 同口径。
+    """
+    counts = {"answered": 0, "skipped": 0, "pending": 0}
+    total = len(snapshot.questions)
+    for i in range(total):
+        st = (snapshot.question_status[i]
+              if i < len(snapshot.question_status) else "pending")
+        counts[st if st in counts else "pending"] += 1
+    counts["total"] = total
+    return counts
+
+
+def _ended_reason_note(ended_reason: str) -> str:
+    """把"这场面试是怎么结束的"翻译成评分口径（ADR-007R）。"""
+    if ended_reason == EndedReason.TIMEOUT:
+        return (
+            "面试**因超时自动结束**，报告只能基于**已答部分**评分。\n"
+            "存在未及作答的题目时绝不因此扣分 —— 那是时间到了，不是候选人不会。"
+        )
+    if ended_reason == EndedReason.MANUAL:
+        return (
+            "面试被候选人**主动放弃**（点击了「放弃并重开」）。\n"
+            "报告基于放弃之前已经答过的部分评分，未及作答的题目同样不扣分。"
+        )
+    return "面试**正常结束**（题目已问完或候选人主动结束），按常规口径评分。"
+
+
+def _report_target(user_id: int):
+    """决定"给哪一场面试出报告、以及它的结束原因"（T-26 + T-27）。
+
+    返回 `(snapshot, ended_reason)`；没有可评的对象时返回 `None`。
+
+    1. **有进行中的会话** → 评这一场，`ended_reason = completed`；
+    2. **否则取最近结束的一场**（且还没出过报告）→ 用库里那一行真实的
+       `ended_reason`。
+
+    第 2 条是 T-27 补的，也是"超时不出报告"在路由层的根因：
+    ADR-007R 要求"超时仍要出报告"，而超时后会话已经是 `abandoned`，
+    `get_active()` 永远取不到它 —— 修复前这里只能返回 409，
+    用户超时后就再也拿不到任何评估结果。
+
+    `ended_reason` **一律以库里那一行为准**，绝不接受客户端自报：
+    否则前端只要声称"我超时了"，就能拿到一份按"未及作答"口径打的宽松分数。
+    """
+    snapshot = _active_session(user_id)
+    if snapshot is not None:
+        return snapshot, EndedReason.COMPLETED
+
+    last = get_session_store().get_last_ended(user_id)
+    if last is None or last.report:
+        # 没有结束过的会话，或那一场已经出过报告 —— 都算"没有可评的对象"。
+        # 后者顺带挡住重复计费：重发不会让模型再算一遍。
+        return None
+    return last, (last.ended_reason or EndedReason.MANUAL)
+
+
 @router.post("/generate_report")
 async def generate_report(current_user: User = Depends(require_user)):
-    """T-26 / Bug 3A：评分**以服务端会话为准**，请求体不再接收 `messages`。
+    """T-26 / Bug 3A + T-27 / FR-4.5：评分**以服务端会话为准**，且超时也出报告。
 
-    契约变更：请求体从 `{"messages": [...]}` 变成**空体**（甚至可以不传 body）。
-    前端不再有机会影响评分输入。
+    契约变更（T-26）：请求体从 `{"messages": [...]}` 变成**空体**
+    （甚至可以不传 body）。前端不再有机会影响评分输入。
+
+    T-27 在此基础上补齐两件事：
+      1. **超时会话也能出报告** —— 超时后会话是 `abandoned`，
+         `_report_target` 会回退到"最近结束且还没出报告"的一场
+         （ADR-007R：超时仍要出报告）。修复前这种情况直接 409，
+         用户超时后就再也拿不到任何评估结果。
+      2. **评分口径区分"未及作答"与"答不上"** —— `pending` 的题是
+         面试结束/超时导致的未及作答，**不得计入扣分**；`skipped`
+         才是主动放弃，照常计分。零作答超时不得当作"全错给全 0"。
+
+    `ended_reason` 与两个计数由**服务端**写入，不采信模型输出（也不接受客户端自报）。
     """
-    snapshot = _active_session(current_user.id)
-    if snapshot is None:
-        # 与 /api/chat 同口径：没有进行中的面试就没有报告可评。
+    target = _report_target(current_user.id)
+    if target is None:
+        # 与 /api/chat 同口径：没有可评的面试就没有报告可评。
         # 修复前这里能凭空拿前端传来的 messages 生成一份"报告"，
         # 是又一条白嫖 AI 的路径。
         return _no_session_response()
 
+    snapshot, ended_reason = target
+    counts = _answer_counts(snapshot)
     transcript, question_count = _build_transcript(snapshot)
-    question_status_note = ""
     slist = []
     for i, q in enumerate(snapshot.questions):
-        st = snapshot.question_status[i]
+        st = (snapshot.question_status[i]
+              if i < len(snapshot.question_status) else "pending")
         slist.append(f"  Q{i+1}: {q} -> {st}")
-    question_status_note = ("\n## 各问题回答状态：\n" + "\n".join(slist) +
-                            "\n（answered=已回答, skipped=跳过, pending=未答）"
-                            "请参考这些状态调整评分。")
+    question_status_note = ("\n## 五、各题状态（由系统给出，与下方对话记录一一对应）：\n"
+                            + "\n".join(slist))
 
     prompt = f"""你是一位极其严格的技术面试评估专家。请根据以下面试对话，对候选人进行冷酷、真实的评估。
 
-## 评分标准（重要，请严格执行）：
+## 一、本场面试的结束方式（先读这一节，它决定评分口径）
+ended_reason = {ended_reason}
+{_ended_reason_note(ended_reason)}
 
-### 无法回答问题（得 0 分）：
-- 如果候选人对你提出的问题一个都没有给出有效回答（全是我不会/不知道/没学过/没接触过/跳过等），则所有分数均为 0。
+## 二、三种题目状态的处理方式**完全不同**（本次评分的核心规则）
+对话记录里每道题的作答都带状态，请严格区分：
+- [尚未作答]（status=pending）：候选人**从未有机会回答**这道题。
+  它属于「**未及作答**」，**不是**「答不上」，**不得计入扣分**，
+  更**不得**被当作答错、不会、或敷衍。
+  请把它当作"这场面试里没有发生过的题"：它不进入分母，也不拉低任何分项。
+- [跳过此题]（status=skipped）：候选人**主动**放弃该题（点了跳过，或说了
+  "不会/不知道/没学过"）。这属于「**答不上**」，**照常计分** ——
+  这正是它与 [尚未作答] 的唯一、但关键的区别。
+- 有正常作答的题（status=answered）：照常计分。
+
+## 三、评分标准（重要，请严格执行）：
+
+### 给全 0 分的**唯一**条件（口径比以往更窄，必须按新口径执行）：
+- 只有当"**真正问过**的题"（= answered + skipped）**全部**属于无效回答
+  （我不会/不知道/没学过/没接触过/跳过/敷衍）时，才可以给全 0 分。
+- ⚠️ 只要存在 [尚未作答] 的题，就**不得**因为"没答满"而清零，也**不得**
+  把 [尚未作答] 当作无效回答去凑满"全部无效"这个条件。
 - 如果候选人回复高度简短且无实质内容（如只用"是的""嗯""对"敷衍），也视为无效回答。
 
-### 有效回答率与分数对照：
+### 一道题都没答上就结束了（answered=0 且 skipped=0）：
+- 此时**没有任何可评估的作答内容**，这是「**未及作答，无法评分**」，
+  不是「候选人全错」。**不得**输出"全 0 分"式的结论。
+- 必须在 details 中明确写出「未及作答，无法评分」，并说明面试在收到
+  任何回答之前就已结束。
+- 各分数字段仍需给出数值，但它**不代表**对候选人的负面评价。
+
+### 有效回答率与分数对照（分母 = 真正问过的题 = answered + skipped，**不含** [尚未作答]）：
 - 回答了 1 个问题且质量勉强及格 -> 总分 3-4 分
 - 回答了一半问题，有缺陷 -> 总分 4-5 分
 - 回答了大部分问题但存在明显错误 -> 总分 5-6 分
@@ -569,17 +719,25 @@ async def generate_report(current_user: User = Depends(require_user)):
 - logic_score：逻辑思维是否清晰，能否结构化地分析问题（混乱=1-3，一般=4-6，严谨=7-9）
 {question_status_note}
 
-## 面试对话记录（共{question_count}轮提问）：
+## 六、本场统计（由系统给出，请直接采用，不要自己重新数）：
+- 总题数 total_questions = {counts['total']}
+- 正常作答 answered = {counts['answered']}
+- 主动跳过 skipped = {counts['skipped']}（属于"答不上"，照常计分）
+- 未及作答 pending = {counts['pending']}（**不得计入扣分**）
+
+## 七、面试对话记录（共{question_count}轮提问）：
 {transcript}
 
 ## 输出格式（严格 JSON，不要其他内容）：
+`ended_reason` 由系统写入，**你不要输出该字段**；`answered_count` 必须等于
+上面的 answered = {counts['answered']}，不要自行改动。
 {{
     "expression_score": 整数(0-10),
     "technical_score": 整数(0-10),
     "logic_score": 整数(0-10),
     "overall_score": 保留一位小数(0.0-10.0),
-    "answered_count": 有效回答的问题数量,
-    "total_questions": {question_count},
+    "answered_count": {counts['answered']},
+    "total_questions": {counts['total']},
     "suggestion": "具体可操作的改进建议（50字以上，如指出哪些知识点需要补强）",
     "details": "简要总结优点和不足"
 }}"""
@@ -594,25 +752,33 @@ async def generate_report(current_user: User = Depends(require_user)):
         )
         result_text = response.choices[0].message.content
         result = extract_json_from_response(result_text)
+        _stamp_server_facts(result, ended_reason, counts)
 
         # T-23：原先是 `interview_sessions.pop(user_id)` —— 用"删掉会话"来
         # 释放"同一用户只能有一场进行中面试"的锁。持久化之后语义是
         # **置为 finished**（ADR-004 报告路径：报告落库与置终态同事务）。
         # 若此处不置终态，用户会在每场面试后被锁到 TTL 结束（2 小时）——
         # 那是把 ADR-022R 明确要消除的问题重新引入。
-        _finish_session(snapshot, result)
+        #
+        # T-27：超时会话走 `attach_report` —— 报告落库但**状态保持 abandoned**
+        # （ADR-022R 裁决"超时不是 finished"）。
+        _persist_report(snapshot, result)
         return result
     except Exception as e:
-        return {
+        # 降级结果同样带上服务端事实：前端要靠 `ended_reason` 决定是否
+        # 显示"因超时自动结束"的提示，缺了它会把超时面试显示成正常完成。
+        degraded = {
             "expression_score": 0,
             "technical_score": 0,
             "logic_score": 0,
             "overall_score": 0.0,
-            "answered_count": 0,
-            "total_questions": question_count,
+            "answered_count": counts["answered"],
+            "total_questions": counts["total"],
             "suggestion": f"评估服务异常：{str(e)}，请联系管理员。",
             "details": "评分服务暂时不可用，本次面试未生成有效评估。"
         }
+        _stamp_server_facts(degraded, ended_reason, counts)
+        return degraded
 
 
 @router.post("/save_interview")
