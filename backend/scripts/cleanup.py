@@ -68,12 +68,20 @@ T-51 起 `token_blacklist` **已纳入清理**（见上一节）；此前"刻意
 
 import argparse
 import datetime
-import errno
 import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from scripts.single_instance import (  # noqa: E402
+    CLEANUP_LOCK_SUFFIX as LOCK_SUFFIX,
+)
+from scripts.single_instance import (  # noqa: E402
+    DEFAULT_STALE_AFTER_SECONDS,
+    acquire_lock,
+    lock_path_for as _lock_path_for,
+    release_lock,
+)
 from services.stores.base import iso_after, utcnow_iso  # noqa: E402
 
 #: 限流窗口长度（§6.3：10 分钟）。清理只删**窗口外**的记录，
@@ -82,62 +90,27 @@ from services.stores.base import iso_after, utcnow_iso  # noqa: E402
 #:  `expires_at`，清理只按 `expires_at` 判断。）
 ATTEMPT_WINDOW_SECONDS = 10 * 60
 
-DEFAULT_STALE_AFTER_SECONDS = 60 * 60      # 锁超过 1 小时视为上次崩溃遗留
-
-LOCK_SUFFIX = ".cleanup.lock"
-
 
 # ---------------------------------------------------------------------------
 # 单实例锁
 # ---------------------------------------------------------------------------
+#
+# T-52 起，锁的实现**搬到了 `scripts/single_instance.py`**，因为 T-52 的
+# 备份轮转脚本需要**完全一样的语义**（原子创建 / 按年龄抢占遗留锁 /
+# 失败也放锁）。搬走时逐字保留了行为，这里只做委派：
+#
+#   * `DEFAULT_STALE_AFTER_SECONDS` 与 `acquire_lock` / `release_lock`
+#     直接从 `single_instance` 导入（名字不变，老调用方与测试照常工作）；
+#   * 下面两个薄封装保留，是为了让"锁文件叫 `.cleanup.lock`"这条 T-22
+#     的既有约定不泄漏到本文件之外。
 
 def lock_path_for(db_path):
-    return os.path.abspath(db_path) + LOCK_SUFFIX
+    """清理专用的锁文件路径（后缀保持 `.cleanup.lock` 不变）。
 
-
-def acquire_lock(lock_path, stale_after=DEFAULT_STALE_AFTER_SECONDS, now=None,
-                 log=print):
-    """尝试取锁。成功 True；已有实例在跑 False。
-
-    `O_CREAT|O_EXCL` 的文件创建是**原子**的：两个进程同时调用只有一个成功，
-    不需要引入额外的锁设施。
+    改后缀的后果不是"少了个文件"，而是**把上一轮仍在运行这件事忘掉** ——
+    新老版本共存时会同时写同一个库。
     """
-    moment = now or datetime.datetime.now()
-    payload = "%d\n%s\n" % (os.getpid(), moment.isoformat())
-    try:
-        fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-    except OSError as exc:
-        if exc.errno != errno.EEXIST:
-            raise
-        try:
-            age = moment.timestamp() - os.path.getmtime(lock_path)
-        except OSError:
-            age = 0
-        if age < stale_after:
-            log("  已有另一个清理实例在运行（锁文件 %s，%.1f 秒前创建）—— 本次跳过"
-                % (os.path.basename(lock_path), age))
-            return False
-        log("  发现 %.0f 秒前的遗留锁（疑似上次崩溃）—— 抢占" % age)
-        try:
-            os.remove(lock_path)
-        except OSError:
-            pass
-        # 抢占后重试一次。若此刻别人正好抢先，下一轮的 age 会接近 0 -> 返回 False，
-        # 因此不会无限递归。
-        return acquire_lock(lock_path, stale_after, now, log)
-
-    try:
-        os.write(fd, payload.encode("utf-8"))
-    finally:
-        os.close(fd)
-    return True
-
-
-def release_lock(lock_path):
-    try:
-        os.remove(lock_path)
-    except OSError:
-        pass
+    return _lock_path_for(db_path, LOCK_SUFFIX)
 
 
 # ---------------------------------------------------------------------------

@@ -478,8 +478,8 @@
 |---|---|---|---|---|---|
 | T-50 | **新功能** | JWT 滑动续期 + **8h 绝对上限** + `auth_time`（ADR-016，**P0**）—— ✅ 交付见 `docs/36-manual-verification.md` | 4h | T-36 | ✅ |
 | T-51 | **新功能** | `jti` 声明 + `token_blacklist` 真登出（ADR-003 选 B）—— ✅ 交付见 `docs/37-manual-verification.md` | 3h | T-22,T-50 | ✅ |
-| T-52 | **新功能** | 备份脚本 + `backup.timer`（ADR-019） | 2h | T-22 | 🔒 |
-| T-53 | **新功能** | Nginx：**托管 `dist/` + 同源反代 `/api`、`/uploads`** + `/admin` history 回退 + `client_max_body_size 8m` + XFF 转发 + HTTPS/Certbot（ADR-012/015） | 3h | T-34 | ⬜ |
+| T-52 | **新功能** | 备份脚本 + `backup.timer`（ADR-019）—— ✅ 交付见 `docs/38-manual-verification.md`（`scripts/rotate_backup.py` + `deploy/systemd/backup.{service,timer}` + 57 项测试 + 离线一键验收） | 2h | T-22 | ✅ |
+| T-53 | **新功能** | Nginx：**托管 `dist/` + 同源反代 `/api`、`/uploads`** + `/admin` history 回退 + `client_max_body_size 8m` + XFF 转发 + HTTPS/Certbot（ADR-012/015）—— ✅ 交付见 `docs/40-manual-verification.md`（`deploy/nginx/*` 6 份配置 + 38 项测试 + **`docs/39-aliyun-upgrade-runbook.md` 升级手册**） | 3h | T-34 | ✅ |
 | T-54 | 质量 | 后端 P0 接口测试补齐（鉴权/越权/409/降级）（NFR-6） | 4h | 阶段 1–3 | ⬜ |
 | T-55 | 质量 | 前端关键测试（AuthContext / 401 / Toast / 超时锁定）（NFR-6） | 3h | 阶段 4 | ⬜ |
 | T-56 | 质量 | 并发与幂等专项测试（乐观锁 / `seq` / 版本冲突）（NFR-6） | 4h | T-19 | 🔒 |
@@ -507,7 +507,7 @@
 | **合计** | **56** | **143h（≈18 人天）** | 已脚本核验：56 个唯一 ID，工时加总 143h |
 
 **🔒 待启动任务：共 23 个**
-`T-14 ~ T-33`（阶段 2 全部 9 个 + 阶段 3 全部 11 个）+ `T-51`、`T-52`、`T-56`
+`T-14 ~ T-33`（阶段 2 全部 9 个 + 阶段 3 全部 11 个）+ `T-53`、`T-54`、`T-56`
 
 ---
 

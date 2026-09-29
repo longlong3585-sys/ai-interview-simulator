@@ -1,0 +1,30 @@
+[Unit]
+Description=AI 面试系统 · 每日触发数据备份（03:30，保留 7 份）
+Documentation=file:///opt/ai-interview-simulator/docs/03-tasks.md
+
+[Timer]
+# 每日 03:30 一次。
+# 选凌晨的三个理由：
+#   * 业务低谷（本项目面试时长 15 分钟，凌晨几乎没有会话在推进，WAL 快照更小）；
+#   * 与 cleanup.timer（每 15 分钟）天然错开：两者都要写同一个库所在的目录，
+#     没必要挤在同一秒；
+#   * 03:30 而不是 00:00 —— 跨零点的一批业务日志已经落盘，
+#     `%Y%m%d` 命名的当天备份内容才是"完整的一天"。
+OnCalendar=*-*-* 03:30:00
+
+# 机器关机/休眠期间错过的触发，开机后**补跑一次**。
+# 备份是幂等的（每次产物按时间戳分目录），补跑无害；
+# 不补的话长时间停机就意味着**连续多天没有备份**。
+Persistent=true
+
+# 随机延迟最多 5 分钟：避免和其它定时任务（cleanup、logrotate）在同一秒抢 IO。
+# 备份是重 IO 操作，错开比准时更重要。
+RandomizedDelaySec=300
+
+# 精确到分钟即可，不需要秒级对齐
+AccuracySec=1min
+
+Unit=backup.service
+
+[Install]
+WantedBy=timers.target
