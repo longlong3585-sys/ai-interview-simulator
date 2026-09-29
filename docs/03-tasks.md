@@ -347,8 +347,8 @@
 | T-41 | **修复 Bug** | 挂载时拉取会话并重建视图（Bug 2 前端） | 3h | T-24,T-40 | ⬜ |
 | T-42 | **修复 Bug** | 超时强制闭环：`useRef` 持最新回调 + **锁定 UI/销毁输入区**（Bug 3A/3B） | 3h | T-40 | ✅ |
 | T-43 | **修复 Bug** | 超时报告文案标注"因超时自动结束，仅基于已答部分评分"（FR-4.5） | 1h | T-27,T-42 | ✅ |
-| T-44 | **新功能** | 启用 `react-router-dom` + 守卫移路由层（顺带修 **FR-11.3 条件 Hook**） | 4h | T-40 | ⬜ |
-| T-45 | **新功能** | 拆分 `AdminPanel` 组件 | 3h | T-44 | ⬜ |
+| T-44 | **新功能** | 启用 `react-router-dom` + 守卫移路由层（顺带修 **FR-11.3 条件 Hook**） | 4h | T-40 | ✅ |
+| T-45 | **新功能** | 拆分 `AdminPanel` 组件 | 3h | T-44 | ✅ |
 | T-46 | **新功能** | 拆分 `InterviewRoom` 组件 | 4h | T-44 | ⬜ |
 | T-47 | **新功能** | 拆分 `ReportView`/`ProfilePanel`/`NotificationCenter`/`QuestionBank` | 4h | T-44 | ⬜ |
 | T-48 | **新功能** | 死代码清理（`historyListRef`、`QuestionBank.tsx` 处置、`_passwordError`） | 2h | T-47 | ⬜ |
@@ -367,6 +367,17 @@
 - T-43：超时报告页显示标注文案；非超时报告不显示
 - T-44：`AdminPanelContent` 不再在 `useState` 前 `return`；令牌由有到无不抛错
 - T-45~T-47：**单文件 ≤400 行**；`App.tsx` 降为路由装配
+
+**T-44 / T-45 交付与验证（2026-09-30）**
+
+- 交付物：`src/auth/AuthContext.tsx`、`src/auth/RequireAuth.tsx`、`src/main.tsx`（路由装配）、
+  `src/admin/AdminPanel.tsx`、`src/admin/AdminPage.tsx`、`src/admin/ReportDetailModal.tsx`、
+  `src/admin/tabs/{StatsDashboard,UsersTable,InterviewsTable}.tsx`、`src/App.tsx`（认证改走 `useAuth`、管理员改走 `/admin`）
+- 契约测试：`frontend/tests/route-guard-contract.test.mjs`（15 项，含"条件 Hook"源码结构断言与判别力自检）
+- 一键验收：`cd backend; .\venv\Scripts\python.exe scripts\verify_t44_t45_manual.py`（不起外网、不自签令牌、不手工复制 Token）
+- 报告：`docs/30-manual-verification.md`
+- 现状：`App.tsx` 2716 → **2269 行**；`main.tsx` 已成路由装配；管理后台最大文件 180 行。
+  **`App.tsx` 尚未降到"纯路由装配"** —— 面谈主流程/报告/个人中心/通知/题库的路由化留给 T-46 / T-47。
 - T-48：上述死代码全库 grep 为 0
 - T-49：构造缺 `tags` 的题目，题库页不崩
 

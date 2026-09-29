@@ -1,5 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
+import { Navigate, useNavigate } from 'react-router-dom';
 import { API_BASE_URL } from './config';
+import { useAuth } from './auth/AuthContext';
 import { authFetch } from './services/api';
 import { ToastHost, type ToastMessage } from './components/Toast';
 import { nextToastId } from './components/toastSeq';
@@ -18,442 +20,8 @@ import {
 } from './interview/timeout';
 import { checkPasswordRules, passwordError } from './utils/passwordRules';
 
-function AdminPanelContent({ token }: { token: string | null }) {
-  if (!token) return <div className="p-4 text-center text-gray-500">请先登录</div>;
-
-  const [activeTab, setActiveTab] = useState<'users' | 'interviews' | 'stats'>('stats');
-  const [users, setUsers] = useState<any[]>([]);
-  const [interviews, setInterviews] = useState<any[]>([]);
-  const [stats, setStats] = useState<any>(null);
-  const [loading, setLoading] = useState(false);
-  const [successMsg, setSuccessMsg] = useState('');
-  const [detailInterview, setDetailInterview] = useState<any>(null);
-
-  const fetchUsers = async () => {
-    if (!token) return;
-    setLoading(true);
-    try {
-      const res = await fetch(`${API_BASE_URL}/api/admin/users`, {
-        headers: { 'Authorization': `Bearer ${token}` }
-      });
-      const data = await res.json();
-      setUsers(data);
-    } catch (err) {
-      console.error(err);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const fetchInterviews = async () => {
-    if (!token) return;
-    setLoading(true);
-    try {
-      const res = await fetch(`${API_BASE_URL}/api/admin/interviews`, {
-        headers: { 'Authorization': `Bearer ${token}` }
-      });
-      const data = await res.json();
-      setInterviews(data);
-    } catch (err) {
-      console.error(err);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const fetchStats = async () => {
-    if (!token) return;
-    setLoading(true);
-    try {
-      const res = await fetch(`${API_BASE_URL}/api/admin/stats`, {
-        headers: { 'Authorization': `Bearer ${token}` }
-      });
-      const data = await res.json();
-      setStats(data);
-    } catch (err) {
-      console.error(err);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    if (!token) return;
-    if (activeTab === 'users') fetchUsers();
-    else if (activeTab === 'interviews') fetchInterviews();
-    else if (activeTab === 'stats') fetchStats();
-  }, [activeTab, token]);
-
-  const updateInterview = async (id: number, status: string, comment: string) => {
-    try {
-      const res = await fetch(`${API_BASE_URL}/api/admin/interviews/${id}`, {
-        method: 'PATCH',
-        headers: {
-          'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({ status, admin_comment: comment })
-      });
-      if (res.ok) {
-        setInterviews(interviews.map(i => i.id === id ? { ...i, status, admin_comment: comment } : i));
-        setSuccessMsg('✅ 更新成功');
-        setTimeout(() => setSuccessMsg(''), 2000);
-      } else {
-        const err = await res.json();
-        alert(err.detail || '更新失败');
-      }
-    } catch (err) {
-      console.error(err);
-      alert('网络错误');
-    }
-  };
-
-  const resetPassword = async (userId: number, newPassword: string) => {
-    try {
-      const res = await fetch(`${API_BASE_URL}/api/admin/users/${userId}/reset_password`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/x-www-form-urlencoded',
-          'Authorization': `Bearer ${token}`
-        },
-        body: new URLSearchParams({ new_password: newPassword }).toString()
-      });
-      if (res.ok) {
-        alert('密码重置成功');
-      } else {
-        const err = await res.json();
-        alert(err.detail || '重置失败');
-      }
-    } catch (err) {
-      console.error(err);
-      alert('网络错误');
-    }
-  };
-
-  const toggleActive = async (userId: number) => {
-    try {
-      const res = await fetch(`${API_BASE_URL}/api/admin/users/${userId}/toggle_active`, {
-        method: 'PATCH',
-        headers: { 'Authorization': `Bearer ${token}` }
-      });
-      if (res.ok) {
-        fetchUsers();
-      } else {
-        const err = await res.json();
-        alert(err.detail || '操作失败');
-      }
-    } catch (err) {
-      console.error(err);
-      alert('网络错误');
-    }
-  };
-
-  const deleteUser = async (userId: number) => {
-    try {
-      const res = await fetch(`${API_BASE_URL}/api/admin/users/${userId}`, {
-        method: 'DELETE',
-        headers: { 'Authorization': `Bearer ${token}` }
-      });
-      if (res.ok) {
-        fetchUsers();
-      } else {
-        const err = await res.json();
-        alert(err.detail || '删除失败');
-      }
-    } catch (err) {
-      console.error(err);
-      alert('网络错误');
-    }
-  };
-
-  const deleteInterview = async (id: number) => {
-    if (!confirm('确定要删除这条面试记录吗？删除后不可恢复。')) return;
-    try {
-      const res = await fetch(`${API_BASE_URL}/api/admin/interviews/${id}`, {
-        method: 'DELETE',
-        headers: { 'Authorization': `Bearer ${token}` }
-      });
-      if (res.ok) {
-        fetchInterviews();
-      } else {
-        const err = await res.json();
-        alert(err.detail || '删除失败');
-      }
-    } catch (err) {
-      console.error(err);
-      alert('网络错误');
-    }
-  };
-
-  return (
-    <div>
-      <div className="flex gap-2 mb-4 border-b">
-        <button onClick={() => setActiveTab('stats')} className={`px-4 py-2 ${activeTab === 'stats' ? 'border-b-2 border-green-500 font-bold' : 'text-gray-500'}`}>📊 仪表盘</button>
-        <button onClick={() => setActiveTab('users')} className={`px-4 py-2 ${activeTab === 'users' ? 'border-b-2 border-green-500 font-bold' : 'text-gray-500'}`}>用户管理</button>
-        <button onClick={() => setActiveTab('interviews')} className={`px-4 py-2 ${activeTab === 'interviews' ? 'border-b-2 border-green-500 font-bold' : 'text-gray-500'}`}>面试记录</button>
-      </div>
-
-      {loading && <p className="text-center py-4">加载中...</p>}
-      {successMsg && <p className="text-center py-2 text-green-600 font-medium transition-opacity">{successMsg}</p>}
-
-      {activeTab === 'stats' && !loading && stats && (
-        <div className="space-y-6">
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-            <div className="bg-blue-50 p-4 rounded shadow">
-              <h3 className="text-sm text-gray-500">总用户数</h3>
-              <p className="text-2xl font-bold">{stats.total_users}</p>
-            </div>
-            <div className="bg-green-50 p-4 rounded shadow">
-              <h3 className="text-sm text-gray-500">总面试次数</h3>
-              <p className="text-2xl font-bold">{stats.total_interviews}</p>
-            </div>
-            <div className="bg-yellow-50 p-4 rounded shadow">
-              <h3 className="text-sm text-gray-500">平均综合得分</h3>
-              <p className="text-2xl font-bold">{stats.avg_overall_score}</p>
-            </div>
-            <div className="bg-purple-50 p-4 rounded shadow">
-              <h3 className="text-sm text-gray-500">通过率</h3>
-              <p className="text-2xl font-bold">{stats.pass_rate}%</p>
-            </div>
-          </div>
-          <div className="bg-gray-50 p-4 rounded shadow">
-            <h3 className="font-bold mb-2">近7天面试趋势</h3>
-            <div className="flex items-end space-x-2 h-40">
-              {stats.daily_interviews?.map((day: any) => (
-                <div key={day.date} className="flex flex-col items-center flex-1">
-                  <div className="bg-blue-500 w-full rounded-t" style={{ height: `${Math.max(day.count * 20, 10)}px` }}></div>
-                  <span className="text-xs mt-1">{day.date.slice(5)}</span>
-                </div>
-              )) || <div className="text-center text-gray-500 w-full">暂无数据</div>}
-            </div>
-          </div>
-        </div>
-      )}
-
-      {activeTab === 'users' && !loading && (
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="bg-gray-100">
-                <th className="p-2 text-left">ID</th>
-                <th className="p-2 text-left">用户名</th>
-                <th className="p-2 text-left">角色</th>
-                <th className="p-2 text-left">邮箱</th>
-                <th className="p-2 text-left">状态</th>
-                <th className="p-2 text-left">创建时间</th>
-                <th className="p-2 text-left">操作</th>
-               </tr>
-            </thead>
-            <tbody>
-              {users.map(u => (
-                <tr key={u.id} className="border-b">
-                  <td className="p-2">{u.id}</td>
-                  <td className="p-2">{u.username}</td>
-                  <td className="p-2">
-                    <span className={`px-2 py-1 rounded text-xs ${u.role === 'admin' ? 'bg-red-100 text-red-700' : 'bg-blue-100 text-blue-700'}`}>{u.role}</span>
-                  </td>
-                  <td className="p-2">{u.email || '-'}</td>
-                  <td className="p-2">
-                    <span className={`px-2 py-1 rounded text-xs ${u.is_active ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-700'}`}>{u.is_active ? '活跃' : '禁用'}</span>
-                  </td>
-                  <td className="p-2">{new Date(u.created_at).toLocaleString()}</td>
-                  <td className="p-2">
-                    <div className="flex gap-1 flex-wrap">
-                      <button
-                        onClick={() => {
-                          const newPwd = prompt('请输入新密码（至少8位）');
-                          if (newPwd && newPwd.length >= 8) {
-                            resetPassword(u.id, newPwd);
-                          } else if (newPwd) {
-                            alert('密码长度至少8位');
-                          }
-                        }}
-                        className="bg-blue-500 text-white px-2 py-1 rounded text-xs"
-                      >
-                        重置密码
-                      </button>
-                      {u.role !== 'admin' && (
-                        <>
-                          <button
-                            onClick={() => toggleActive(u.id)}
-                            className={`px-2 py-1 rounded text-xs ${u.is_active ? 'bg-yellow-500 text-white' : 'bg-green-500 text-white'}`}
-                          >
-                            {u.is_active ? '禁用' : '启用'}
-                          </button>
-                          <button
-                            onClick={() => {
-                              if (confirm(`确定删除用户 ${u.username}？`)) {
-                                deleteUser(u.id);
-                              }
-                            }}
-                            className="bg-red-500 text-white px-2 py-1 rounded text-xs"
-                          >
-                            删除
-                          </button>
-                        </>
-                      )}
-                    </div>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          {users.length === 0 && <p className="text-center py-4 text-gray-500">暂无用户</p>}
-        </div>
-      )}
-
-      {activeTab === 'interviews' && !loading && (
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="bg-gray-100">
-                <th className="p-2 text-left">ID</th>
-                <th className="p-2 text-left">用户</th>
-                <th className="p-2 text-left">岗位</th>
-                <th className="p-2 text-left">得分</th>
-                <th className="p-2 text-left">状态</th>
-                <th className="p-2 text-left">评语</th>
-                <th className="p-2 text-left">创建时间</th>
-                <th className="p-2 text-left">操作</th>
-               </tr>
-            </thead>
-            <tbody>
-              {interviews.map(i => (
-                <tr key={i.id} className="border-b hover:bg-gray-50">
-                  <td className="p-2">{i.id}</td>
-                  <td className="p-2">{i.username}</td>
-                  <td className="p-2">{i.role}</td>
-                  <td className="p-2">
-                    {i.report ? (
-                      <span className={`font-bold ${i.report.overall_score >= 7 ? 'text-green-600' : i.report.overall_score >= 4 ? 'text-yellow-600' : 'text-red-600'}`}>
-                        {i.report.overall_score}
-                      </span>
-                    ) : '-'}
-                  </td>
-                  <td className="p-2">
-                    <span className={`px-2 py-1 rounded text-xs ${
-                      i.status === 'approved' ? 'bg-green-100 text-green-700' :
-                      i.status === 'rejected' ? 'bg-red-100 text-red-700' :
-                      'bg-yellow-100 text-yellow-700'
-                    }`}>
-                      {i.status === 'approved' ? '已通过' : i.status === 'rejected' ? '已拒绝' : '待审核'}
-                    </span>
-                  </td>
-                  <td className="p-2">
-                    <input
-                      type="text"
-                      value={i.admin_comment || ''}
-                      onChange={e => {
-                        const newInterviews = [...interviews];
-                        const idx = newInterviews.findIndex(item => item.id === i.id);
-                        newInterviews[idx].admin_comment = e.target.value;
-                        setInterviews(newInterviews);
-                      }}
-                      className="border rounded px-1 py-0.5 text-sm w-32"
-                      placeholder="评语"
-                    />
-                  </td>
-                  <td className="p-2">{new Date(i.created_at).toLocaleString()}</td>
-                  <td className="p-2">
-                    <div className="flex gap-1">
-                      <button
-                        onClick={() => setDetailInterview(i)}
-                        className="bg-purple-500 text-white px-2 py-1 rounded text-xs hover:bg-purple-600"
-                      >
-                        详情
-                      </button>
-                      <select value={i.status} onChange={e => {
-                        const newInterviews = [...interviews];
-                        const idx = newInterviews.findIndex(item => item.id === i.id);
-                        newInterviews[idx].status = e.target.value;
-                        setInterviews(newInterviews);
-                      }} className="border rounded px-2 py-1 text-xs">
-                        <option value="pending">待审核</option>
-                        <option value="approved">通过</option>
-                        <option value="rejected">拒绝</option>
-                      </select>
-                      <button
-                        onClick={() => updateInterview(i.id, i.status, i.admin_comment || '')}
-                        className="bg-blue-500 text-white px-2 py-1 rounded text-xs"
-                      >
-                        更新
-                      </button>
-                      <button
-                        onClick={() => deleteInterview(i.id)}
-                        className="bg-red-400 text-white px-2 py-1 rounded text-xs hover:bg-red-600"
-                      >
-                        删除
-                      </button>
-                    </div>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          {interviews.length === 0 && <p className="text-center py-4 text-gray-500">暂无面试记录</p>}
-        </div>
-      )}
-
-      {detailInterview && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50" onClick={() => setDetailInterview(null)}>
-          <div className="bg-white rounded-lg p-6 max-w-lg w-full max-h-[80vh] overflow-auto" onClick={e => e.stopPropagation()}>
-            <div className="flex justify-between items-center mb-4">
-              <h2 className="text-lg font-bold">面试报告详情</h2>
-              <button onClick={() => setDetailInterview(null)} className="text-gray-500 hover:text-gray-700 text-xl">×</button>
-            </div>
-            <div className="text-sm space-y-3">
-              <div className="flex gap-4">
-                <span>用户：<strong>{detailInterview.username}</strong></span>
-                <span>岗位：<strong>{detailInterview.role}</strong></span>
-                <span>时间：<strong>{new Date(detailInterview.created_at).toLocaleString()}</strong></span>
-              </div>
-              {detailInterview.report ? (
-                <>
-                  <div className="flex items-center justify-center p-3 bg-blue-50 rounded-lg">
-                    <div className="text-center">
-                      <div className={`text-3xl font-extrabold ${detailInterview.report.overall_score >= 7 ? 'text-green-600' : detailInterview.report.overall_score >= 4 ? 'text-yellow-600' : 'text-red-600'}`}>
-                        {detailInterview.report.overall_score}/10
-                      </div>
-                      <div className="text-xs text-gray-500">综合得分</div>
-                    </div>
-                  </div>
-                  <div className="grid grid-cols-3 gap-2 text-center">
-                    <div className="bg-gray-50 p-2 rounded">
-                      <div className="text-xs text-gray-500">表达能力</div>
-                      <div className="font-bold">{detailInterview.report.expression_score}/10</div>
-                    </div>
-                    <div className="bg-gray-50 p-2 rounded">
-                      <div className="text-xs text-gray-500">技术深度</div>
-                      <div className="font-bold">{detailInterview.report.technical_score}/10</div>
-                    </div>
-                    <div className="bg-gray-50 p-2 rounded">
-                      <div className="text-xs text-gray-500">逻辑思维</div>
-                      <div className="font-bold">{detailInterview.report.logic_score}/10</div>
-                    </div>
-                  </div>
-                  {detailInterview.report.details && (
-                    <div className="bg-gray-50 p-2 rounded">
-                      <p className="text-xs text-gray-500 mb-1">总结</p>
-                      <p>{detailInterview.report.details}</p>
-                    </div>
-                  )}
-                  {detailInterview.report.suggestion && (
-                    <div className="bg-orange-50 p-2 rounded border border-orange-200">
-                      <p className="text-xs text-gray-500 mb-1">改进建议</p>
-                      <p className="text-orange-800">{detailInterview.report.suggestion}</p>
-                    </div>
-                  )}
-                </>
-              ) : (
-                <p className="text-gray-400 text-center py-4">暂无报告数据</p>
-              )}
-            </div>
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
+// T-45：管理员面板已拆到 src/admin/AdminPanel.tsx，
+// 由路由 /admin（src/admin/AdminPage.tsx）承载；本文件不再内联这段 436 行的组件。
 
 function App() {
   const [messages, setMessages] = useState<Array<{role: string, content: string}>>([]);
@@ -519,11 +87,11 @@ function App() {
   const [questionBankLoading, setQuestionBankLoading] = useState(false);
   
   // 用户认证
-  const [token, setToken] = useState<string | null>(localStorage.getItem('token'));
-  const [_userId, setUserId] = useState<number | null>(null);
-  const [userRole, setUserRole] = useState<string | null>(localStorage.getItem('role'));
-  const [currentUsername, setCurrentUsername] = useState<string>(localStorage.getItem('username') || '');
-  const [showAdminPanel, setShowAdminPanel] = useState(false);
+  // T-44：认证状态（token / userId / role / username）**唯一真源**在 AuthContext，
+  // 持久化与登出清理都由它保证；这里只解构出历史名字，函数体一律不改动。
+  const { token, role: userRole, username: currentUsername, isAdmin, signIn, signOut } = useAuth();
+  // T-44：管理员面板从"布尔量驱动的弹窗"改为 `/admin` 路由，跳转靠 router。
+  const navigate = useNavigate();
   const [showInfoPanel, setShowInfoPanel] = useState(false);
   const [infoTab, setInfoTab] = useState<'notifications' | 'history'>('notifications');
   const [expandedHistoryId, setExpandedHistoryId] = useState<number | null>(null);
@@ -1218,13 +786,13 @@ function App() {
       const data = await res.json();
       if (res.ok) {
         if (authMode === 'login') {
-          setToken(data.access_token);
-          setUserId(data.user_id);
-          setUserRole(data.role);
-          setCurrentUsername(username);
-          localStorage.setItem('token', data.access_token);
-          localStorage.setItem('role', data.role);
-          localStorage.setItem('username', username);
+          // T-44：状态与持久化的唯一写路径
+          signIn({
+            token: data.access_token,
+            userId: data.user_id,
+            role: data.role,
+            username,
+          });
           setShowAuthModal(false);
           setUsername('');
           setPassword('');
@@ -1521,13 +1089,8 @@ function App() {
   };
 
   const logout = () => {
-    setToken(null);
-    setUserId(null);
-    setUserRole(null);
-    setCurrentUsername('');
-    localStorage.removeItem('token');
-    localStorage.removeItem('role');
-    localStorage.removeItem('username');
+    // T-44：认证三件套 + 持久化清理收敛进 AuthContext
+    signOut();
     // T-42：登出必须把超时锁定态一起清干净 ——
     // 否则下一个账号登录后会继承"上一场的锁定面板 + 超时 Toast"。
     stopTimer();
@@ -1593,11 +1156,6 @@ function App() {
     }
   }, [token, userRole]);
 
-  useEffect(() => {
-    if (token && userRole === 'admin') {
-      setShowAdminPanel(true);
-    }
-  }, [token, userRole]);
 
   useEffect(() => {
     if (!token) return;
@@ -1617,6 +1175,13 @@ function App() {
       loadNotifications(token);
     }
   }, [token, showInfoPanel, userRole]);
+
+  // T-44：管理员不再"弹面板"——登录后直接进入独立的管理后台路由。
+  // 这一步原本藏在 App 里（`if (userRole === 'admin') setShowAdminPanel(true)`），
+  // 现在由路由层接手：URL 即状态，刷新/前进后退都能回到同一屏。
+  if (isAdmin) {
+    return <Navigate to="/admin" replace />;
+  }
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-slate-50 via-white to-slate-50">
@@ -1649,7 +1214,7 @@ function App() {
             {token ? (
               <>
                 {userRole === 'admin' && (
-                  <button onClick={() => setShowAdminPanel(true)} className="btn-ghost text-sm flex items-center gap-1.5 text-primary-600">
+                  <button onClick={() => navigate('/admin')} className="btn-ghost text-sm flex items-center gap-1.5 text-primary-600">
                     <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" /></svg>
                     <span>管理</span>
                   </button>
@@ -1991,18 +1556,6 @@ function App() {
         </div>
       )}
 
-      {/* 管理员面板*/}
-      {showAdminPanel && userRole === 'admin' && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50" onClick={() => setShowAdminPanel(false)}>
-          <div className="bg-white rounded-lg p-6 w-11/12 max-w-4xl max-h-[90vh] overflow-auto" onClick={(e) => e.stopPropagation()}>
-            <div className="flex justify-between items-center mb-4">
-              <h2 className="text-2xl font-bold">⚙️ 管理后台</h2>
-              <button onClick={() => setShowAdminPanel(false)} className="text-gray-500 text-xl">X</button>
-            </div>
-            <AdminPanelContent token={token} />
-          </div>
-        </div>
-      )}
 
       {/* 未登录提示 */}
       {!token && (
@@ -2070,7 +1623,7 @@ function App() {
               <h3 className="font-bold text-primary-800 mb-1">管理员模式</h3>
               <p className="text-sm text-primary-600">您当前处于管理员账户，不能进行面试。请使用管理后台管理用户和面试记录。</p>
             </div>
-            <button onClick={() => setShowAdminPanel(true)} className="btn-primary text-sm px-4 py-2 shrink-0">
+            <button onClick={() => navigate('/admin')} className="btn-primary text-sm px-4 py-2 shrink-0">
               打开管理后台
             </button>
           </div>
