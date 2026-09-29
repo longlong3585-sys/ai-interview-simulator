@@ -32,7 +32,8 @@ app.add_middleware(
     # 不会把它们交给前端 JS —— 续期令牌"后端发了但前端读不到"，滑动续期静默失效。
     # 注意：CORS 来源不得配成通配 `*`（credentials 模式下浏览器不允许读通配来源的响应头）；
     # 本项目已选同源托管（见 docs/33 §5），这里保留显式白名单即可。
-    expose_headers=["X-Captcha-Id", "X-Refreshed-Token", "X-Token-Expired"],
+    # T-51 追加 `X-Token-Revoked`（真登出的标记头）。
+    expose_headers=["X-Captcha-Id", "X-Refreshed-Token", "X-Token-Expired", "X-Token-Revoked"],
 )
 
 # T-50 / ADR-016：滑动续期 + 8 小时绝对上限。

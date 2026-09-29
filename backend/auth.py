@@ -17,6 +17,7 @@ from captcha.image import ImageCaptcha
 from config import SECRET_KEY, ALGORITHM, ACCESS_TOKEN_EXPIRE_MINUTES, CAPTCHA_TTL, CAPTCHA_MAX_ERRORS, CAPTCHA_LOCK_MINUTES
 from database import SessionLocal, User
 from utils.token_renewal import origin_auth_claims
+from utils.token_revocation import is_token_revoked
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/login")
 
@@ -194,6 +195,20 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
             raise credentials_exception
     except JWTError:
         raise credentials_exception
+
+    # T-51 / ADR-003 选 B：**真登出**。
+    #
+    # 修复前"登出"只是前端把 localStorage 里的令牌删掉 —— 令牌本身仍然有效，
+    # 被抄走就还能用；T-50 把续期链拉到 8 小时之后，这个洞被显著放大。
+    # 现在登出会把 jti 写进 token_blacklist，这里在**鉴权链最底层**统一拦截
+    # （get_current_admin_user / require_user 都依赖本函数 —— 一处修改即全覆盖）。
+    #
+    # 为什么放在这里而不是只放中间件：中间件在 ASGI 层、按路径前缀跳过公开端点，
+    # 而"令牌是否被吊销"是**身份问题**，必须跟身份校验在同一层，
+    # 否则将来新增一条绕过中间件的调用路径（直接调依赖、后台任务）就会漏。
+    if is_token_revoked(payload):
+        raise credentials_exception
+
     user = db.query(User).filter(User.username == username).first()
     if user is None:
         raise credentials_exception

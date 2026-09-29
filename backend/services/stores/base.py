@@ -539,3 +539,36 @@ class RateLimitStore(Protocol):
     def purge_older_than(self, before: str) -> int:
         """删除 `before` 之前的记录，返回删除行数（供 T-22 定时清理）。"""
         ...
+
+
+@runtime_checkable
+class TokenBlacklistStore(Protocol):
+    """令牌吊销黑名单（ADR-003 选 B，T-51）。
+
+    ## 为什么必须有 TTL，而且必须 ≥ 8 小时
+
+    没有清理 ⇒ 表只增不减；清理太早 ⇒ **被吊销的令牌复活**：
+    续期链可活 8 小时（T-50 的绝对上限），若黑名单只留 30 分钟，
+    那么"登出 → 等 30 分钟 → 用旧令牌继续用"就成立了，吊销形同虚设。
+    这条约束记在 `docs/02-arch-review.md` 的 R-4，并写进 §6.3 的 TTL 表。
+
+    ## 时间契约
+
+    与其余存储一致：UTC ISO-8601 字符串（字典序 = 时间序，SQL 里可直接比大小）。
+    """
+
+    def revoke(self, jti: str, expires_at: str) -> None:
+        """吊销 `jti` 直到 `expires_at`。
+
+        **必须幂等**：用户在两个标签页点"退出"、或前端网络重试，都会重复吊销同一个
+        `jti`；重复调用不得抛错（实现用 `INSERT OR REPLACE`）。
+        """
+        ...
+
+    def is_revoked(self, jti: str, now: str) -> bool:
+        """该 `jti` 是否处于生效中的吊销状态。
+
+        `expires_at <= now` 的记录视为已失效（等同不存在）—— 与"已被清理任务删掉"
+        必须**行为一致**，否则清理节奏会变成一个隐藏开关。
+        """
+        ...

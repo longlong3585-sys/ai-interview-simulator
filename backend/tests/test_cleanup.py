@@ -83,6 +83,12 @@ def seed(path):
                      (iso(-1800),))
         conn.execute("INSERT INTO auth_attempts (ip,attempted_at) VALUES ('1.1.1.1',?)",
                      (iso(-10),))
+        # T-51：令牌吊销记录。一条已失效（该清）、一条仍生效（**绝不能**清 ——
+        # 删掉仍生效的行就是让被吊销的令牌复活）。
+        conn.execute("INSERT INTO token_blacklist (jti,expires_at) VALUES ('jti-expired',?)",
+                     (iso(-10),))
+        conn.execute("INSERT INTO token_blacklist (jti,expires_at) VALUES ('jti-live',?)",
+                     (iso(3600),))
         conn.commit()
     finally:
         conn.close()
@@ -215,11 +221,24 @@ class RunCleanupTests(CleanupHarness):
     def test_dry_run_reports_counts_without_changing_anything(self):
         stats = self.cleanup(dry_run=True)
         self.assertEqual(stats, {"sessions_abandoned": 1, "captchas_purged": 1,
-                                 "attempts_purged": 1})
+                                 "attempts_purged": 1, "blacklist_purged": 1})
         # 什么都没改
         self.assertEqual(self.status_of("expired-active"), "active")
         self.assertEqual(q1(self.db, "SELECT count(*) FROM captcha_store"), 2)
         self.assertEqual(q1(self.db, "SELECT count(*) FROM auth_attempts"), 2)
+        self.assertEqual(q1(self.db, "SELECT count(*) FROM token_blacklist"), 2)
+
+    def test_blacklist_purge_never_removes_live_revocations(self):
+        """T-51 / R-4 的关键一条：只清 `expires_at <= now` 的吊销记录。
+
+        删掉**仍生效**的行 = 让被吊销的令牌复活 —— 那正是本次要堵的洞，
+        而且这种 bug 在"刚登出还能用"与"登出后过一会儿又能用"之间极难区分。
+        """
+        self.cleanup()
+        left = q1(self.db, "SELECT count(*) FROM token_blacklist")
+        self.assertEqual(left, 1, "清理把仍生效的吊销记录也删了 —— 被吊销令牌会复活")
+        self.assertEqual(
+            q1(self.db, "SELECT jti FROM token_blacklist"), "jti-live")
 
     def test_real_run_matches_dry_run_preview(self):
         """预览与实际必须一致 —— 否则 dry-run 就没有参考价值。"""
@@ -299,7 +318,7 @@ class RunCleanupTests(CleanupHarness):
         self.cleanup()
         second = self.cleanup()
         self.assertEqual(second, {"sessions_abandoned": 0, "captchas_purged": 0,
-                                  "attempts_purged": 0})
+                                  "attempts_purged": 0, "blacklist_purged": 0})
 
     def test_uses_injected_session_factory_and_engine(self):
         """可注入装配（测试用），且注入时不去碰 db_path。"""

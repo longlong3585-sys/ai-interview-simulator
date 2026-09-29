@@ -43,16 +43,15 @@
 
 ## 为什么每个动作都走 `services/stores` 而不是直接写 SQL
 
-本项目的规矩是"业务代码只依赖协议"。清理脚本同样如此：三个动作分别调用
+本项目的规矩是"业务代码只依赖协议"。清理脚本同样如此：四个动作分别调用
 `SessionStore.abandon_all_expired` / `CaptchaStore.purge_expired` /
-`RateLimitStore.purge_older_than`。将来换存储载体时这个脚本一行都不用改。
+`RateLimitStore.purge_older_than` / `TokenBlacklistStore.purge_expired`。
+将来换存储载体时这个脚本一行都不用改。
 
 ## 已知未覆盖项（如实声明，不假装完整）
 
-`token_blacklist`（§6.3 标 8 小时 TTL）**本任务不清理**。原因：
-T-16 明确**刻意不定义**该表的协议 —— 它挂在 ADR-003 选 B（P1）之下，
-`jti` 是否"续期沿用同一条"尚未落地，提前定接口会把未定的语义锁死。
-该表目前也是空的（未启用）。等 ADR-003-B 开工时补协议，届时这里加一行即可。
+T-51 起 `token_blacklist` **已纳入清理**（见上一节）；此前"刻意不清理"的理由
+（协议未定义、表是空的）已随 T-51 落地而消失。
 
 用法
 ----
@@ -187,6 +186,7 @@ def run_cleanup(db_path, dry_run=False, session_factory=None, engine=None, log=p
     from services.stores.sqlite_captcha_store import SQLiteCaptchaStore
     from services.stores.sqlite_rate_limit_store import SQLiteRateLimitStore
     from services.stores.sqlite_store import SQLiteSessionStore
+    from services.stores.sqlite_token_blacklist_store import SQLiteTokenBlacklistStore
 
     own_engine = None
     if session_factory is None or engine is None:
@@ -213,6 +213,10 @@ def run_cleanup(db_path, dry_run=False, session_factory=None, engine=None, log=p
                         text("SELECT count(*) FROM auth_attempts "
                              "WHERE attempted_at < :before"),
                         {"before": attempt_cutoff}).scalar(),
+                    "blacklist_purged": conn.execute(
+                        text("SELECT count(*) FROM token_blacklist "
+                             "WHERE expires_at <= :now"),
+                        {"now": now}).scalar(),
                 }
 
         return {
@@ -222,6 +226,8 @@ def run_cleanup(db_path, dry_run=False, session_factory=None, engine=None, log=p
                 SQLiteCaptchaStore(session_factory).purge_expired(now),
             "attempts_purged":
                 SQLiteRateLimitStore(session_factory).purge_older_than(attempt_cutoff),
+            "blacklist_purged":
+                SQLiteTokenBlacklistStore(session_factory).purge_expired(now),
         }
     finally:
         if own_engine is not None:
@@ -234,7 +240,7 @@ def run_cleanup(db_path, dry_run=False, session_factory=None, engine=None, log=p
 
 def build_parser():
     ap = argparse.ArgumentParser(
-        description="数据生命周期清理（会话置 abandoned / 验证码与限流记录清除）")
+        description="数据生命周期清理（会话置 abandoned / 验证码、限流与令牌吊销记录清除）")
     ap.add_argument("--db", default=None,
                     help="目标数据库路径（默认 backend/interview.db）")
     ap.add_argument("--dry-run", action="store_true",
@@ -287,6 +293,7 @@ def main(argv=None):
     print("  过期会话置 abandoned : %d" % stats["sessions_abandoned"])
     print("  过期验证码清除       : %d" % stats["captchas_purged"])
     print("  窗口外失败记录清除   : %d" % stats["attempts_purged"])
+    print("  失效吊销记录清除     : %d" % stats["blacklist_purged"])
     print("")
     print("耗时 %.2f 秒" % elapsed)
     print("结论: %s" % ("DRY-RUN 完成（未改动任何数据）" if args.dry_run

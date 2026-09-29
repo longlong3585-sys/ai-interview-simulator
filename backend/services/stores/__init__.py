@@ -26,6 +26,7 @@ from services.stores.base import (  # noqa: F401
     SessionStore,
     StoreError,
     TERMINAL_STATUSES,
+    TokenBlacklistStore,
     iso_after,
     utcnow_iso,
 )
@@ -44,6 +45,7 @@ __all__ = [
     "SessionStore",
     "StoreError",
     "TERMINAL_STATUSES",
+    "TokenBlacklistStore",
     "iso_after",
     "utcnow_iso",
 ]

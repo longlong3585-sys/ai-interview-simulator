@@ -13,15 +13,21 @@
 
 import os
 
-from services.stores.base import CaptchaStore, RateLimitStore, SessionStore
+from services.stores.base import (
+    CaptchaStore,
+    RateLimitStore,
+    SessionStore,
+    TokenBlacklistStore,
+)
 from services.stores.sqlite_captcha_store import SQLiteCaptchaStore
 from services.stores.sqlite_rate_limit_store import SQLiteRateLimitStore
 from services.stores.sqlite_store import SQLiteSessionStore
+from services.stores.sqlite_token_blacklist_store import SQLiteTokenBlacklistStore
 
 #: 装配表：kind -> (环境变量, 协议, 中文名, sqlite 实现类)
 #:
 #: **加一个存储只需要在这里加一行** —— `_assemble` 的装配与协议自检逻辑
-#: 完全不用改（T-20 与 T-21 都验证了这一点）。
+#: 完全不用改（T-20 与 T-21 都验证了这一点，T-51 是第三次）。
 _REGISTRY = {
     "session": (
         "SESSION_STORE_BACKEND", SessionStore, "会话存储", SQLiteSessionStore,
@@ -32,6 +38,10 @@ _REGISTRY = {
     "rate_limit": (
         "RATE_LIMIT_STORE_BACKEND", RateLimitStore, "限流存储",
         SQLiteRateLimitStore,
+    ),
+    "token_blacklist": (
+        "TOKEN_BLACKLIST_STORE_BACKEND", TokenBlacklistStore, "令牌黑名单存储",
+        SQLiteTokenBlacklistStore,
     ),
 }
 
@@ -89,6 +99,18 @@ def get_rate_limit_store():
     return _instances["rate_limit"]
 
 
+def get_token_blacklist_store():
+    """返回令牌黑名单存储（进程内单例）。实现由 `TOKEN_BLACKLIST_STORE_BACKEND` 选择。
+
+    T-51：登出写、每个受保护请求读。**读路径必须走 `is_revoked()` 的
+    `expires_at > now` 过滤** —— 不能只看"这一行在不在"，否则清理任务
+    一旦延后就等于吊销永久生效（用户被自己的旧令牌永久挡在门外）。
+    """
+    if "token_blacklist" not in _instances:
+        _assemble("token_blacklist")
+    return _instances["token_blacklist"]
+
+
 def reset_stores():
     """仅供测试：清掉全部单例，让下次调用重新装配。"""
     _instances.clear()
@@ -109,12 +131,19 @@ def reset_rate_limit_store():
     _instances.pop("rate_limit", None)
 
 
+def reset_token_blacklist_store():
+    """仅供测试：只清令牌黑名单存储单例（T-51）。"""
+    _instances.pop("token_blacklist", None)
+
+
 __all__ = [
     "get_session_store",
     "get_captcha_store",
     "get_rate_limit_store",
+    "get_token_blacklist_store",
     "reset_stores",
     "reset_session_store",
     "reset_captcha_store",
     "reset_rate_limit_store",
+    "reset_token_blacklist_store",
 ]

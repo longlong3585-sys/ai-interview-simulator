@@ -94,8 +94,12 @@ sudo systemctl start cleanup.service && journalctl -u cleanup.service -n 10 --no
 
 ## 已知未覆盖项
 
-`token_blacklist`（架构 §6.3 标注 8 小时 TTL）**当前不清理**。
-原因：T-16 明确**刻意不定义**该表的协议 —— 它挂在 ADR-003 选 B（P1）之下，
-`jti` 是否"续期沿用同一条"（ADR-016 第 5 点）尚未落地，提前定接口会把
-未定的语义锁死。该表目前未启用（0 行）。等 ADR-003-B 开工时补协议，
-届时在 `cleanup.py` 里加一行调用即可。
+`token_blacklist` **已覆盖**（T-51 起）。此前"当前不清理"的理由是
+T-16 刻意不定义该表协议（挂在 ADR-003 选 B 之下），而表是空的。
+T-51 落地后协议已存在（`TokenBlacklistStore`）、表开始有数据，
+`cleanup.py` 因此补上了第四个动作：只删 `expires_at <= now` 的记录。
+
+⚠️ 这条 WHERE 是本脚本里**最不能写错**的一行：删掉仍生效的吊销记录
+等于让被吊销的令牌复活（`docs/02-arch-review.md` R-4）。
+`tests/test_cleanup.py::test_blacklist_purge_never_removes_live_revocations`
+专门钉住它。

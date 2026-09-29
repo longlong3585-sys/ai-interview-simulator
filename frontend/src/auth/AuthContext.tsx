@@ -46,6 +46,7 @@ import {
   type AuthPersistedKey,
   type AuthStorageLike,
 } from './authStorage';
+import { apiPost } from '../services/api';
 
 export type UserRole = 'admin' | 'user' | null;
 
@@ -217,8 +218,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const signOut = useCallback(() => {
-    // 先把盘上的清干净（登出必须立刻生效，不能等 effect 那一拍），
-    // 再让 reducer 把内存态归零 —— effect 随后写回的是同一份空快照，不会打架。
+    // T-51 / ADR-003 选 B：**先让服务端吊销这枚令牌**，再清本地。
+    //
+    // 顺序很重要：`apiPost('/api/logout')` 走统一出口，会自动带上
+    // `Authorization: Bearer <当前令牌>`；而下面那行会把它从存储里删掉。
+    // 先删后调 = 请求不带令牌 = 服务端无从吊销（变成"只清了本地"的老行为）。
+    //
+    // 刻意 **fire-and-forget**（不 await、不阻塞 UI）：登出必须"点了就生效"，
+    // 网络失败也不能把用户留在登录态；失败时服务端那枚令牌会自然过期
+    // （最长 30 分钟；这也是"下线即吊销"与"可用性"之间的取舍）。
+    void apiPost('/api/logout').catch(() => {
+      /* 网络失败/令牌已过期都无所谓：本地状态照清，见上 */
+    });
+
+    // 再把盘上的清干净（登出必须立刻生效，不能等 effect 那一拍），
+    // 最后让 reducer 把内存态归零 —— effect 随后写回的是同一份空快照，不会打架。
     const storage = safeLocalStorage();
     if (storage) clearAuthStorage(storage, STORAGE_KEYS);
     dispatch({ type: 'SIGN_OUT' });

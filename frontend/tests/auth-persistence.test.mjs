@@ -254,6 +254,30 @@ test('三个入口都在：signIn 落 userId、signOut 清盘、applyRefreshedTo
   );
 });
 
+test('T-51 真登出：signOut 必须先让服务端吊销令牌，再清本地', () => {
+  // 顺序是**功能正确性**而不是风格：`apiPost('/api/logout')` 走统一出口、
+  // 自动带 `Authorization: Bearer <当前令牌>`；而清盘会把它从存储里删掉。
+  // 先清后调 = 请求不带令牌 = 服务端无从吊销（退化成"只清了本地"的老行为）。
+  const signOutBody = AUTH_CONTEXT.slice(
+    AUTH_CONTEXT.indexOf('const signOut = useCallback'),
+    AUTH_CONTEXT.indexOf('const applyRefreshedToken')
+  );
+  const logoutIdx = signOutBody.indexOf("apiPost('/api/logout')");
+  const clearIdx = signOutBody.indexOf('clearAuthStorage(storage, STORAGE_KEYS)');
+  assert.ok(logoutIdx > 0, 'signOut 没有调用 /api/logout —— T-51 之后登出必须服务端吊销');
+  assert.ok(clearIdx > 0, 'signOut 没有清本地');
+  assert.ok(logoutIdx < clearIdx, 'signOut 先清了本地再调登出 —— 请求会不带令牌，吊销落空');
+  // 刻意 fire-and-forget：登出必须"点了就生效"，网络失败不能把用户留在登录态。
+  assert.match(signOutBody, /\.catch\(/, 'signOut 没有吞掉登出请求的失败（网络异常会打断登出）');
+  assert.ok(!/await\s+apiPost\('\/api\/logout'\)/.test(signOutBody), 'signOut 不应 await 登出请求（会阻塞 UI）');
+  // 判别力自检：把顺序颠倒过来必须被判为违规。
+  const naive = "clearAuthStorage(storage, STORAGE_KEYS);\nvoid apiPost('/api/logout');";
+  assert.ok(
+    naive.indexOf("apiPost('/api/logout')") > naive.indexOf('clearAuthStorage'),
+    '判别力自检失败：顺序判定恒真'
+  );
+});
+
 test('登录响应里的 user_id 真的被交给 AuthContext（否则落盘的永远是 null）', () => {
   assert.match(AUTH_MODAL, /userId: data\.user_id/, 'AuthModal 没有把 data.user_id 交给 signIn');
   assert.match(AUTH_MODAL, /signIn\(\{/, 'AuthModal 没有调用 signIn');
