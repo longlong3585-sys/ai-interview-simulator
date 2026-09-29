@@ -9,6 +9,11 @@
  * 注意 `setUserId(data.user_id)` 是读取响应的属性访问，**不带冒号**，
  * 不会被本规则误伤。
  *
+ * ⚠️ T-46 / T-47 之后 `App.tsx` 只是装配层，`/api/chat` 等请求搬去了
+ * `src/interview/*`。本文件仍只扫 `App.tsx`，**同一口径的全树版本**由
+ * `route-guard-contract.test.mjs` 的「不再触碰死参数」一条覆盖（它遍历 21 个源文件）。
+ * 两处一起看，才是"全库 grep 为 0"。
+ *
  * 运行：cd frontend && npm run test:node
  */
 

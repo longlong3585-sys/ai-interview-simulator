@@ -13,17 +13,39 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(HERE, '..', '..');
-const APP_TSX = path.join(REPO_ROOT, 'frontend', 'src', 'App.tsx');
+const SRC_DIR = path.join(REPO_ROOT, 'frontend', 'src');
+const APP_TSX = path.join(SRC_DIR, 'App.tsx');
 const INTERVIEW_PY = path.join(REPO_ROOT, 'backend', 'routers', 'interview.py');
 
 const appSource = readFileSync(APP_TSX, 'utf8');
 const pySource = readFileSync(INTERVIEW_PY, 'utf8');
+
+/**
+ * T-46 / T-47 之后"前端"不再等于 App.tsx：面试主流程搬去了 `src/interview/*`。
+ * 因此"前端没有第二份跳过词列表"这条不变量必须扫**整棵 src 树** ——
+ * 否则把硬编码搬个文件就绕过了它（护栏必须跟着代码一起搬）。
+ */
+function allFrontendSource() {
+  const files = [];
+  const walk = (dir) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else if (/\.(ts|tsx)$/.test(entry.name)) files.push(full);
+    }
+  };
+  walk(SRC_DIR);
+  files.sort();
+  return files.map((f) => readFileSync(f, 'utf8')).join('\n');
+}
+
+const frontSource = allFrontendSource();
 
 /** 抽出后端 SKIP_WORDS 常量的字面量。 */
 function backendSkipWords() {
@@ -62,7 +84,7 @@ function hardcodedSkipWordLists(source, words) {
 
 test('前端不再硬编码跳过词列表（单一来源不变量的核心）', () => {
   const words = backendSkipWords();
-  const offending = hardcodedSkipWordLists(appSource, words);
+  const offending = hardcodedSkipWordLists(frontSource, words);
 
   assert.deepEqual(
     offending,
@@ -102,12 +124,17 @@ test('硬编码检测规则本身有效（防止规则写错导致永远通过�
 
 test('前端确实从 config 接口获取跳过词', () => {
   assert.ok(
-    /\/api\/interview\/config/.test(appSource),
+    /\/api\/interview\/config/.test(frontSource),
     '前端未调用 /api/interview/config'
   );
   assert.ok(
-    /setSkipWords\s*\(/.test(appSource),
+    /setSkipWords\s*\(/.test(frontSource),
     '前端未把后端下发的 skip_words 写入状态'
+  );
+  // 反向：App.tsx（装配层）自己不该再拉一次面试配置 —— 那是 useInterviewSession 的职责。
+  assert.ok(
+    !/\/api\/interview\/config/.test(appSource),
+    'App.tsx 里仍有第二处 /api/interview/config 调用（应只由 useInterviewSession 负责）'
   );
 });
 

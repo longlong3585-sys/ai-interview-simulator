@@ -15,7 +15,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -36,14 +36,39 @@ import {
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(HERE, '..', '..');
 const APP_TSX = path.join(REPO_ROOT, 'frontend', 'src', 'App.tsx');
+const REPORT_VIEW = path.join(REPO_ROOT, 'frontend', 'src', 'report', 'ReportView.tsx');
 const MODULE_TS = path.join(REPO_ROOT, 'frontend', 'src', 'interview', 'timeout.ts');
 const INTERVIEW_PY = path.join(REPO_ROOT, 'backend', 'routers', 'interview.py');
 const BASE_PY = path.join(REPO_ROOT, 'backend', 'services', 'stores', 'base.py');
 
 const appSource = readFileSync(APP_TSX, 'utf8');
+const reportViewSource = readFileSync(REPORT_VIEW, 'utf8');
 const moduleSource = readFileSync(MODULE_TS, 'utf8');
 const pySource = readFileSync(INTERVIEW_PY, 'utf8');
 const baseSource = readFileSync(BASE_PY, 'utf8');
+
+/**
+ * T-46 / T-47 之后，"接线"不再集中在一个文件里（面谈主流程拆去了
+ * `src/interview/*`，报告页拆去了 `src/report/ReportView.tsx`）。
+ *
+ * 因此这一层断言必须扫**整棵 src 树**：只盯 `App.tsx` 的话，
+ * 任何人把逻辑挪到别的文件都会让护栏**静默失效** ——
+ * 拆分时这里确实一次报出 9 条"假警报"（代码没问题，是护栏忘了一起搬）。
+ * 只扫源码文件（`.ts` / `.tsx`），排除构建产物与测试。
+ */
+function allFrontendSource() {
+  const files = [];
+  const walk = (dir) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else if (/\.(ts|tsx)$/.test(entry.name)) files.push(full);
+    }
+  };
+  walk(path.join(REPO_ROOT, 'frontend', 'src'));
+  files.sort();
+  return files.map((f) => readFileSync(f, 'utf8')).join('\n');
+}
 
 /**
  * 去掉注释后再做"代码形状"断言。
@@ -61,6 +86,8 @@ function codeOnly(source) {
 }
 
 const appCode = codeOnly(appSource);
+/** 全树源码（去注释）：T-46 / T-47 之后接线断言的口径。 */
+const frontCode = codeOnly(allFrontendSource());
 
 // ---------------------------------------------------------------------------
 // 1. 纯逻辑：服务端时间 → 死线
@@ -233,7 +260,7 @@ test('纯逻辑层本身不得再藏一份时长常量', () => {
 /** 找 `<textarea` 是否落在"非锁定"分支里。 */
 function textareaIsOutsideLockedBranch(source) {
   const lockedIdx = source.indexOf('data-testid="interview-locked"');
-  assert.notEqual(lockedIdx, -1, 'App.tsx 缺少锁定面板（data-testid="interview-locked"）');
+  assert.notEqual(lockedIdx, -1, '前端源码缺少锁定面板（data-testid="interview-locked"）');
   const elseIdx = source.indexOf(') : (', lockedIdx);
   const textareaIdx = source.indexOf('<textarea', lockedIdx);
   assert.notEqual(elseIdx, -1, '锁定面板后面没有找到三元表达式的 else 分支');
@@ -241,37 +268,37 @@ function textareaIsOutsideLockedBranch(source) {
   return elseIdx < textareaIdx;
 }
 
-test('App.tsx 不再硬编码面试时长，也不再逐秒自减', () => {
-  assert.doesNotMatch(appCode, /setTimeLeft\(\s*15\s*\*\s*60\s*\)/, '仍有 setTimeLeft(15 * 60)');
-  assert.doesNotMatch(appCode, /return prev - 1/, '倒计时退回逐秒自减（挂起/节流后会比真实时间慢）');
-  assert.match(appCode, /formatCountdown\(/, '未使用 formatCountdown 渲染倒计时');
-  assert.match(appCode, /remainingSeconds\(/, '未按死线重算剩余时间');
+test('前端源码不再硬编码面试时长，也不再逐秒自减', () => {
+  assert.doesNotMatch(frontCode, /setTimeLeft\(\s*15\s*\*\s*60\s*\)/, '仍有 setTimeLeft(15 * 60)');
+  assert.doesNotMatch(frontCode, /return prev - 1/, '倒计时退回逐秒自减（挂起/节流后会比真实时间慢）');
+  assert.match(frontCode, /formatCountdown\(/, '未使用 formatCountdown 渲染倒计时');
+  assert.match(frontCode, /remainingSeconds\(/, '未按死线重算剩余时间');
 });
 
-test('App.tsx 用服务端下发的 duration_seconds 与权威死线武装倒计时', () => {
-  assert.match(appCode, /duration_seconds/, '未读取服务端下发的 duration_seconds');
-  assert.match(appCode, /armInterviewDeadline\(/, '未用服务端时间武装倒计时');
-  assert.match(appCode, /\/api\/interview\/session/, '未向会话读接口同步权威死线');
-  assert.match(appCode, /syncDeadlineFromServer/, '缺少服务端死线同步入口');
-  assert.match(appCode, /visibilitychange/, '标签页挂起恢复后没有重新校正倒计时');
+test('前端源码用服务端下发的 duration_seconds 与权威死线武装倒计时', () => {
+  assert.match(frontCode, /duration_seconds/, '未读取服务端下发的 duration_seconds');
+  assert.match(frontCode, /armInterviewDeadline\(/, '未用服务端时间武装倒计时');
+  assert.match(frontCode, /\/api\/interview\/session/, '未向会话读接口同步权威死线');
+  assert.match(frontCode, /syncDeadlineFromServer/, '缺少服务端死线同步入口');
+  assert.match(frontCode, /visibilitychange/, '标签页挂起恢复后没有重新校正倒计时');
 });
 
-test('App.tsx 在每一条写路径上识别服务端超时并锁定', () => {
-  const hits = appCode.match(/isTimeoutResponse\(/g) || [];
+test('前端源码在每一条写路径上识别服务端超时并锁定', () => {
+  const hits = frontCode.match(/isTimeoutResponse\(/g) || [];
   assert.ok(hits.length >= 2, `isTimeoutResponse 只出现 ${hits.length} 次（chat 与 skip_question 两条写路径都要拦）`);
-  assert.match(appCode, /lockByServerTimeout\(/, '超时后没有锁定入口');
-  assert.match(appCode, /persistent: true/, '超时 Toast 被设成会自动消失（关键反馈不应被错过）');
-  assert.match(appCode, /ToastHost/, '未挂载 Toast');
-  assert.match(appCode, /isTimeoutEnded\(/, '刷新后发现超时时没有识别 last_ended');
+  assert.match(frontCode, /lockByServerTimeout\(/, '超时后没有锁定入口');
+  assert.match(frontCode, /persistent: true/, '超时 Toast 被设成会自动消失（关键反馈不应被错过）');
+  assert.match(frontCode, /ToastHost/, '未挂载 Toast');
+  assert.match(frontCode, /isTimeoutEnded\(/, '刷新后发现超时时没有识别 last_ended');
 });
 
 test('T-42：超时锁定后输入区被销毁，而不是置灰', () => {
   assert.ok(
-    textareaIsOutsideLockedBranch(appCode),
+    textareaIsOutsideLockedBranch(frontCode),
     '输入框不在"非锁定"分支里 —— 锁定态下输入区仍然存在于 DOM 中',
   );
-  assert.match(appCode, /interviewLocked \? \(/, '输入区没有被锁定态分支包裹');
-  assert.match(appCode, /sendMessage[\s\S]{0,600}?interviewLocked/, 'sendMessage 未在锁定态提前返回');
+  assert.match(frontCode, /interviewLocked \? \(/, '输入区没有被锁定态分支包裹');
+  assert.match(frontCode, /sendMessage[\s\S]{0,600}?interviewLocked/, 'sendMessage 未在锁定态提前返回');
 });
 
 test('这条"输入区在 else 分支"的检查有判别力（防止规则写错导致永远通过）', () => {
@@ -280,11 +307,11 @@ test('这条"输入区在 else 分支"的检查有判别力（防止规则写错
 });
 
 test('T-42 / Bug 3A：跨渲染的回调走 ref，不再闭包捕获旧 messages', () => {
-  assert.match(appCode, /endInterviewRef\.current = endInterview/, '没有把最新 endInterview 写进 ref');
-  const viaRef = appCode.match(/setTimeout\(\(\) => endInterviewRef\.current\(\)/g) || [];
+  assert.match(frontCode, /endInterviewRef\.current = endInterview/, '没有把最新 endInterview 写进 ref');
+  const viaRef = frontCode.match(/setTimeout\(\(\) => endInterviewRef\.current\(\)/g) || [];
   assert.ok(viaRef.length >= 2, `只有 ${viaRef.length} 处通过 ref 调用 endInterview（chat 与 skip 各一处）`);
   assert.doesNotMatch(
-    appCode,
+    frontCode,
     /setTimeout\(\(\) => endInterview\(\)/,
     '仍有 setTimeout 直接调用 endInterview（闭包捕获旧的 messages）',
   );
@@ -292,20 +319,30 @@ test('T-42 / Bug 3A：跨渲染的回调走 ref，不再闭包捕获旧 messages
 
 test('T-42：超时后允许零作答直接出报告（服务端 T-27 会给「未及作答」口径）', () => {
   assert.match(
-    appCode,
-    /messages\.length === 0 && !interviewLocked/,
+    frontCode,
+    /messages\.length === 0 && !(?:timeout\.)?interviewLocked/,
     '零作答的超时会话被前端拦住，用户拿不到报告',
   );
 });
 
 test('T-43：超时报告页显示标注文案，非超时报告不显示', () => {
-  assert.match(appCode, /data-testid="report-timeout-note"/, '报告页缺少超时标注');
-  assert.match(appCode, /isTimeoutReport\(report\)/, '标注没有按 ended_reason 判定（会误伤正常报告）');
-  const reportBranch = appCode.indexOf('{report ? (');
-  const noteIdx = appCode.indexOf('data-testid="report-timeout-note"');
-  assert.notEqual(reportBranch, -1, '未找到报告分支');
-  assert.ok(noteIdx > reportBranch, '超时标注不在报告分支内');
-  assert.match(appCode, /TIMEOUT_REPORT_NOTE/, '标注未使用统一的文案常量');
+  // T-47：报告页已拆到 src/report/ReportView.tsx，因此这一条**定点**扫那个文件：
+  // 用整树 indexOf 会比较"哪个文件恰好排在前面"，属于假证据。
+  assert.match(reportViewSource, /data-testid="report-timeout-note"/, '报告页缺少超时标注');
+  assert.match(reportViewSource, /isTimeoutReport\(report\)/, '标注没有按 ended_reason 判定（会误伤正常报告）');
+  assert.match(reportViewSource, /TIMEOUT_REPORT_NOTE/, '标注未使用统一的文案常量');
+  assert.match(
+    reportViewSource,
+    /isTimeoutReport\(report\)\s*&&\s*\(/,
+    '标注没有条件渲染 —— 正常完成的报告也会被贴上"超时"标签',
+  );
+});
+
+test('T-47：App.tsx 只做装配 —— 报告屏与面试屏分别由 <ReportView> / <InterviewRoom> 承载', () => {
+  assert.match(appCode, /<ReportView report=\{session\.report\}/, 'App.tsx 未装配报告视图');
+  assert.match(appCode, /<InterviewRoom session=\{session\} \/>/, 'App.tsx 未装配面试视图');
+  assert.doesNotMatch(appCode, /data-testid="report-timeout-note"/, '报告页 JSX 仍内联在 App.tsx');
+  assert.doesNotMatch(appCode, /data-testid="interview-locked"/, '超时锁定面板 JSX 仍内联在 App.tsx');
 });
 
 // ---------------------------------------------------------------------------

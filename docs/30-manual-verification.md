@@ -1,5 +1,9 @@
 # T-44 / T-45 人工验收：路由化 + 路由层守卫 + 条件 Hook + AdminPanel 拆分
 
+> ⏭️ **后续**：面谈主流程 / 报告 / 个人中心 / 通知中心 / 题库的拆分见
+> `docs/31-manual-verification.md`（T-46 / T-47，`App.tsx` 2189 → 227 行）。
+> 本文档里"仍留在 App.tsx"的陈述是当时的事实记录，此后不再更新。
+>
 > 对应任务：`docs/03-tasks.md` 的 **T-44**（启用 `react-router-dom` + 守卫移路由层，顺带修 **FR-11.3 条件 Hook**）
 > 与 **T-45**（拆分 `AdminPanel` 组件）
 > 上游：`docs/28-manual-verification.md`（T-28 后端超时兜底）、`docs/29-manual-verification.md`（T-42/T-43 前端超时闭环）

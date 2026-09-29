@@ -45,6 +45,18 @@ const TABS_USERS = read('admin', 'tabs', 'UsersTable.tsx');
 const TABS_INTERVIEWS = read('admin', 'tabs', 'InterviewsTable.tsx');
 const AUTH_CONTEXT = read('auth', 'AuthContext.tsx');
 const REQUIRE_AUTH = read('auth', 'RequireAuth.tsx');
+// T-46 / T-47：面谈主流程、报告、通知、资料、登录、题库各自独立成文件。
+const AUTH_MODAL = read('auth', 'AuthModal.tsx');
+const SESSION_HOOK = read('interview', 'useInterviewSession.ts');
+const TIMEOUT_HOOK = read('interview', 'useInterviewTimeout.ts');
+const CHAT_HOOK = read('interview', 'useInterviewChat.ts');
+const SPEECH_HOOK = read('interview', 'useSpeech.ts');
+const INTERVIEW_ROOM = read('interview', 'InterviewRoom.tsx');
+const QUESTION_BANK_MODAL = read('interview', 'QuestionBankModal.tsx');
+const REPORT_VIEW = read('report', 'ReportView.tsx');
+const NOTIF_HOOK = read('notifications', 'useNotificationCenter.ts');
+const NOTIF_CENTER = read('notifications', 'NotificationCenter.tsx');
+const PROFILE_PANEL = read('profile', 'ProfilePanel.tsx');
 
 /** 每个源文件都存在的哨兵：防止读错文件导致"假通过"。 */
 const FILES = {
@@ -58,6 +70,17 @@ const FILES = {
   'admin/tabs/InterviewsTable.tsx': TABS_INTERVIEWS,
   'auth/AuthContext.tsx': AUTH_CONTEXT,
   'auth/RequireAuth.tsx': REQUIRE_AUTH,
+  'auth/AuthModal.tsx': AUTH_MODAL,
+  'interview/useInterviewSession.ts': SESSION_HOOK,
+  'interview/useInterviewTimeout.ts': TIMEOUT_HOOK,
+  'interview/useInterviewChat.ts': CHAT_HOOK,
+  'interview/useSpeech.ts': SPEECH_HOOK,
+  'interview/InterviewRoom.tsx': INTERVIEW_ROOM,
+  'interview/QuestionBankModal.tsx': QUESTION_BANK_MODAL,
+  'report/ReportView.tsx': REPORT_VIEW,
+  'notifications/useNotificationCenter.ts': NOTIF_HOOK,
+  'notifications/NotificationCenter.tsx': NOTIF_CENTER,
+  'profile/ProfilePanel.tsx': PROFILE_PANEL,
 };
 
 test('T-44/T-45 的全部目标文件都存在且非空（防止路径写错导致假通过）', () => {
@@ -376,11 +399,24 @@ test('T-45：拆分后的单文件行数都在预算内（App.tsx 已从 2716 �
     'admin/tabs/InterviewsTable.tsx': TABS_INTERVIEWS,
     'auth/AuthContext.tsx': AUTH_CONTEXT,
     'auth/RequireAuth.tsx': REQUIRE_AUTH,
+    // T-46 / T-47 的新增文件同样受 ≤400 行预算约束
+    'auth/AuthModal.tsx': AUTH_MODAL,
+    'interview/useInterviewSession.ts': SESSION_HOOK,
+    'interview/useInterviewTimeout.ts': TIMEOUT_HOOK,
+    'interview/useInterviewChat.ts': CHAT_HOOK,
+    'interview/useSpeech.ts': SPEECH_HOOK,
+    'interview/InterviewRoom.tsx': INTERVIEW_ROOM,
+    'interview/QuestionBankModal.tsx': QUESTION_BANK_MODAL,
+    'report/ReportView.tsx': REPORT_VIEW,
+    'notifications/useNotificationCenter.ts': NOTIF_HOOK,
+    'notifications/NotificationCenter.tsx': NOTIF_CENTER,
+    'profile/ProfilePanel.tsx': PROFILE_PANEL,
   };
   for (const [name, src] of Object.entries(budget)) {
     assert.ok(lines(src) <= 400, `${name} 有 ${lines(src)} 行，超出 ≤400 行预算`);
   }
   assert.ok(lines(APP) < 2270, `App.tsx 仍有 ${lines(APP)} 行（T-45 前是 2716 行）`);
+  assert.ok(lines(APP) <= 400, `App.tsx 仍未降到 ≤400 行的"路由装配"（现 ${lines(APP)} 行）`);
   assert.ok(lines(MAIN) <= 80, `main.tsx 作为路由装配点不应臃肿（现 ${lines(MAIN)} 行）`);
 });
 
@@ -424,11 +460,18 @@ test('认证状态收敛进 AuthContext：App.tsx 不再自己 localStorage.getI
   }
 });
 
-test('T-44 不改动业务函数体：App 仍保留 logout 的面试态清理（锁定态必须一起清）', () => {
-  assert.match(APP, /const logout = \(\) => \{/, 'App.tsx 的 logout 不见了');
-  assert.match(APP, /signOut\(\);/, 'logout 未调用 AuthContext 的 signOut');
-  assert.match(APP, /setInterviewLocked\(false\)/, 'logout 丢了超时锁定态清理（T-42 不变量）');
-  assert.match(APP, /setToast\(null\)/, 'logout 丢了 Toast 清理（T-42 不变量）');
+test('T-44/T-46 不改动业务函数体：logout 仍把面试态（含锁定态与 Toast）清干净', () => {
+  // T-46：logout 随面试状态一起搬进了 useInterviewSession.ts。
+  // 不变量本身没变（"登出必须把超时锁定态与 Toast 一起清"），只是换了落点 ——
+  // 因此断言跟着搬，而不是删掉。
+  assert.match(SESSION_HOOK, /const logout = \(\) => \{/, 'logout 不见了（既不在 App.tsx 也不在 useInterviewSession）');
+  assert.match(SESSION_HOOK, /signOut\(\);/, 'logout 未调用 AuthContext 的 signOut');
+  assert.match(SESSION_HOOK, /setToast\(null\)/, 'logout 丢了 Toast 清理（T-42 不变量）');
+  assert.match(SESSION_HOOK, /resetTimeoutState\(\)/, 'logout 未复位超时闭环状态（锁定态会漏到下一个账号）');
+  assert.match(TIMEOUT_HOOK, /setInterviewLocked\(false\)/, '超时锁定态的清理入口不见了（T-42 不变量）');
+  // App.tsx（装配层）必须把"退出"接到这条路径上，否则清得再干净也走不到。
+  assert.match(APP, /onClick=\{session\.logout\}/, 'App.tsx 的"退出"按钮没有接到 session.logout');
+  assert.match(APP, /onLogout=\{session\.logout\}/, '个人中心改密后的强制登出没有接到 session.logout');
 });
 
 test('管理员入口改为路由跳转（URL 即状态，可刷新、可前进后退）', () => {

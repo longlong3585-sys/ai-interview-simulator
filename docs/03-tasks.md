@@ -349,8 +349,8 @@
 | T-43 | **修复 Bug** | 超时报告文案标注"因超时自动结束，仅基于已答部分评分"（FR-4.5） | 1h | T-27,T-42 | ✅ |
 | T-44 | **新功能** | 启用 `react-router-dom` + 守卫移路由层（顺带修 **FR-11.3 条件 Hook**） | 4h | T-40 | ✅ |
 | T-45 | **新功能** | 拆分 `AdminPanel` 组件 | 3h | T-44 | ✅ |
-| T-46 | **新功能** | 拆分 `InterviewRoom` 组件 | 4h | T-44 | ⬜ |
-| T-47 | **新功能** | 拆分 `ReportView`/`ProfilePanel`/`NotificationCenter`/`QuestionBank` | 4h | T-44 | ⬜ |
+| T-46 | **新功能** | 拆分 `InterviewRoom` 组件 | 4h | T-44 | ✅ |
+| T-47 | **新功能** | 拆分 `ReportView`/`ProfilePanel`/`NotificationCenter`/`QuestionBank` | 4h | T-44 | ✅ |
 | T-48 | **新功能** | 死代码清理（`historyListRef`、`QuestionBank.tsx` 处置、`_passwordError`） | 2h | T-47 | ⬜ |
 | T-49 | **修复 Bug** | `q.tags?.map` 可选链，题库缺字段不崩（FR-9.2） | 1h | T-47 | ⬜ |
 
@@ -380,6 +380,29 @@
   **`App.tsx` 尚未降到"纯路由装配"** —— 面谈主流程/报告/个人中心/通知/题库的路由化留给 T-46 / T-47。
 - T-48：上述死代码全库 grep 为 0
 - T-49：构造缺 `tags` 的题目，题库页不崩
+
+**T-46 / T-47 交付与验证（2026-09-30）**
+
+- 交付物（前端）：
+  - 面谈：`src/interview/useInterviewTimeout.ts`、`useSpeech.ts`、`useInterviewChat.ts`、
+    `useInterviewSession.ts`（组合根）、`InterviewRoom.tsx`、`resumeUpload.ts`、
+    `questionBank.ts`、`QuestionBankModal.tsx`
+  - 报告 / 通知 / 资料 / 登录：`src/report/ReportView.tsx`、
+    `src/notifications/{useNotificationCenter.ts,NotificationCenter.tsx}`、
+    `src/profile/ProfilePanel.tsx`、`src/auth/AuthModal.tsx`
+  - `src/App.tsx`：**2189 → 227 行**，只剩顶部导航 + 落地页 + 管理员提示卡 + 6 个视图的装配
+- 契约测试：`frontend/tests/component-split-contract.test.mjs`（新增 10 项：全树 ≤400 行、
+  `App.tsx` 是装配层、单一所有者、接口归属、无反向依赖，含 2 组判别力自检）
+- 一键验收：`cd backend; .\venv\Scripts\python.exe scripts\verify_t46_t47_manual.py`
+  （不起外网、不自签令牌、不手工复制 Token）；T-44/T-45 的脚本仍退出码 0
+- 报告：`docs/31-manual-verification.md`
+- 现状：全树 **30 个 `.ts/.tsx`，最大文件 383 行**（`useInterviewSession.ts`）；
+  `App.tsx` 227 行；`npm run lint` 43 errors（结构性 Hook 规则 refs/immutability/purity 全为 0）
+- 拆分时顺带修掉一个真 bug：语音识别的 `onresult` 闭包引用**首次渲染**的 `sendMessage`
+  （那里的 `input` 是空串），导致"语音输入永远不会自动发送"。改为走 ref（同 T-42 手法），
+  已在 `docs/31` §1/§4 显式登记
+- **未碰 T-48 / T-49 的地盘**：`historyListRef`、`src/QuestionBank.tsx`、`_passwordError`、
+  `q.tags.map`（仍无可选链）全部原样保留
 
 ---
 
