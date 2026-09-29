@@ -338,7 +338,7 @@
 | ID | 类别 | 任务 | 工时 | 依赖 | 标记 |
 |---|---|---|---|---|---|
 | T-34 | **修复 Bug** | API 基地址改**相对路径** + Vite `server.proxy` + `VITE_API_BASE_URL`（Bug 4，**P0**） | 2h | — | ✅ |
-| T-35 | **修复 Bug** | CORS 允许来源配置化，`expose_headers` 加 `X-Refreshed-Token`（NFR-10a） | 1h | T-34 | ⬜ |
+| T-35 | **修复 Bug** | CORS 允许来源配置化，`expose_headers` 加 `X-Refreshed-Token`（NFR-10a）—— **拓扑决定：同源托管，暂不需要独立 CORS**（降级为分域备选，见 T-34 交付说明的「部署拓扑决定」） | 1h | T-34 | ⬜ |
 | T-36 | **新功能** | api 层收敛：**24 处裸 `fetch` 全部迁入**统一层（ADR-016 前置） | 4h | T-03,T-34 | ⬜ |
 | T-37 | **新功能** | Toast 组件 + 全局错误呈现（**禁用 `alert`**）（NFR-13） | 3h | T-03 | ⬜ |
 | T-38 | **新功能** | `ConfirmDialog` 替换 3 处 `confirm`/`prompt`（NFR-13） | 3h | T-37 | ⬜ |
@@ -455,6 +455,21 @@
   （Nginx 反代 + `/admin` 的 history 回退）→ **T-53 / T-54**；
   若将来要前后端分域，需设 `VITE_API_BASE_URL` 并由 **T-35** 把 CORS 允许来源配置化
 
+**部署拓扑决定（2026-09-30，用户裁决）**
+
+- **选择「同源托管」**：前端 `dist/` 由 Nginx 托管，Nginx 同源反代 `/api` 与 `/uploads`。
+  **不用 CDN，不用独立 API 域名。**
+- 直接后果：
+  - **T-35（CORS 允许来源配置化）暂不需要** —— 页面与接口同源，浏览器根本不发预检；
+    它降级为"将来真要分域时"的备选，任务表里已就地标注。
+    注意：`expose_headers` 里的 `X-Refreshed-Token` 仍属 **T-50**（滑动续期）的前置，
+    真要续期时再一起补，不必为它单独开独立 CORS 配置。
+  - **T-53 的范围扩到部署本身**：托管 `dist/` + 同源反代 `/api`、`/uploads`
+    + `/admin` 的 SPA history 回退（`BrowserRouter` 刷新 `/admin` 会真的请求该路径）。
+  - **口径澄清**：`docs/30` §4 曾把 history 回退登记给 "T-54（部署/上线）"，
+    但任务表里的 T-54 是「后端 P0 接口测试」—— 以任务表为准，
+    **部署相关归 T-53**（本行已写明），T-54 保持接口测试。
+
 ---
 
 ## 阶段 5 · 质量、契约与部署
@@ -464,7 +479,7 @@
 | T-50 | **新功能** | JWT 滑动续期 + **8h 绝对上限** + `auth_time`（ADR-016，**P0**） | 4h | T-36 | ⬜ |
 | T-51 | **新功能** | `jti` 声明 + `token_blacklist` 真登出（ADR-003 选 B） | 3h | T-22,T-50 | 🔒 |
 | T-52 | **新功能** | 备份脚本 + `backup.timer`（ADR-019） | 2h | T-22 | 🔒 |
-| T-53 | **新功能** | Nginx：`client_max_body_size 8m` + XFF 转发 + HTTPS/Certbot（ADR-012/015） | 3h | T-34 | ⬜ |
+| T-53 | **新功能** | Nginx：**托管 `dist/` + 同源反代 `/api`、`/uploads`** + `/admin` history 回退 + `client_max_body_size 8m` + XFF 转发 + HTTPS/Certbot（ADR-012/015） | 3h | T-34 | ⬜ |
 | T-54 | 质量 | 后端 P0 接口测试补齐（鉴权/越权/409/降级）（NFR-6） | 4h | 阶段 1–3 | ⬜ |
 | T-55 | 质量 | 前端关键测试（AuthContext / 401 / Toast / 超时锁定）（NFR-6） | 3h | 阶段 4 | ⬜ |
 | T-56 | 质量 | 并发与幂等专项测试（乐观锁 / `seq` / 版本冲突）（NFR-6） | 4h | T-19 | 🔒 |

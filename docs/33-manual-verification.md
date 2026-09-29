@@ -155,3 +155,25 @@ cd backend
 * **`npm run lint` 仍然是红的**：42 errors / 0 warnings（与 T-48/T-49 之后相同，本次没有新增）；
   结构性 Hook 规则（`react-hooks/refs` / `immutability` / `purity`）在验收脚本里是**门槛**。
 * **`e2e-timeout-live.mjs` 不受影响**：它自己接 `--base-url`，与前端基地址解耦。
+
+## 5. 部署拓扑决定（2026-09-30，用户裁决）
+
+**选择「同源托管」**：前端 `dist/` 由 Nginx 托管，Nginx 同源反代 `/api` 与 `/uploads`；
+**不用 CDN，不用独立 API 域名**。这是 T-34 相对化的自然收口，也把当初那三个故障
+（混合内容 / 跨域 / host 内联）从"靠配置绕开"变成"结构上不存在"。
+
+由此确定的三件事：
+
+1. **T-35（CORS 允许来源配置化）暂不需要**，降级为"将来真要分域时"的备选
+   （已就地标注在 `docs/03-tasks.md` 的任务行里）。同源请求不触发 CORS 预检，
+   因此现在不需要 `allow_origins` 白名单。
+   ⚠️ 注意区分：**`expose_headers` 里的 `X-Refreshed-Token` 仍属 T-50（JWT 滑动续期）的前置**，
+   它是"同源也要带的响应头"，与 CORS 白名单不是同一件事，别顺手一起砍掉。
+2. **T-53 的范围扩到部署本身**：托管 `dist/` + 同源反代 `/api`、`/uploads`
+   + `/admin` 的 SPA history 回退（`BrowserRouter` 刷新 `/admin` 会真的请求该路径，
+   `docs/30` §4 记过这条）。
+3. **口径澄清**：`docs/30` §4 把 history 回退登记给"T-54（部署/上线）"，
+   但任务表里的 T-54 是「后端 P0 接口测试」—— 以任务表为准，**部署归 T-53**。
+
+同源托管下，本节开头那两条肉眼验收步骤（`npm run dev` 与 HTTPS 反代）就是终态的
+简化版；上真机后只需把反代目标从 `localhost:5173` 换成 `dist/` 目录与后端端口。
