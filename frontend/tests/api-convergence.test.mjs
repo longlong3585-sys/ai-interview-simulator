@@ -165,19 +165,41 @@ test('① 401 错误的 message 仍是 "Unauthorized"（既有调用点的判定
 });
 
 test('① 统一出口在 401 时先登出、再抛错（顺序写在源码里，不是靠调用点自觉）', () => {
-  const exportIdx = API_SRC.indexOf('export async function request');
+  // 必须去注释：解释这条规则的注释里会**引用** `notifyUnauthorized()` 这个名字，
+  // 不去掉的话"出现过几次"与"谁在前"都会被注释带跑偏（T-50 就撞到过这次假失败）。
+  const code = stripComments(API_SRC);
+  const exportIdx = code.indexOf('export async function request');
   assert.ok(exportIdx > 0, 'services/api.ts 里找不到 request() 出口');
-  const body = API_SRC.slice(exportIdx, API_SRC.indexOf('export async function authFetch'));
+  const body = code.slice(exportIdx, code.indexOf('export async function authFetch'));
   const notifyIdx = body.indexOf('notifyUnauthorized()');
   const throwIdx = body.indexOf("throw new ApiError(401");
   assert.ok(notifyIdx > 0, 'request() 在 401 分支里没有调用 notifyUnauthorized()');
   assert.ok(throwIdx > 0, 'request() 在 401 分支里没有抛出 401 的 ApiError');
   assert.ok(notifyIdx < throwIdx, '必须先登出再抛错（顺序反了会让调用方在已登出状态下继续处理）');
   // 401 分支之外不许再出现第二处登出调用：登出路径必须唯一（排除函数自身的声明行）。
-  const notifyCount = [...API_SRC.matchAll(/(?<!function )\bnotifyUnauthorized\s*\(\s*\)/g)]
-    .filter((m) => !/function\s+$/.test(API_SRC.slice(Math.max(0, m.index - 12), m.index)))
+  const notifyCount = [...code.matchAll(/(?<!function )\bnotifyUnauthorized\s*\(\s*\)/g)]
+    .filter((m) => !/function\s+$/.test(code.slice(Math.max(0, m.index - 12), m.index)))
     .length;
   assert.equal(notifyCount, 1, `notifyUnauthorized() 被调用 ${notifyCount} 次 —— 登出入口必须唯一`);
+});
+
+test('① T-50：绝对上限（X-Token-Expired: absolute）**不得**触发登出，只抛带标记的错误', () => {
+  const code = stripComments(API_SRC);
+  const exportIdx = code.indexOf('export async function request');
+  const body = code.slice(exportIdx, code.indexOf('export async function authFetch'));
+  const absIdx = body.indexOf('isAbsoluteExpiryResponse(response)');
+  const notifyIdx = body.indexOf('notifyUnauthorized()');
+  assert.ok(absIdx > 0, 'request() 没有识别 X-Token-Expired: absolute');
+  assert.ok(
+    absIdx < notifyIdx,
+    '绝对上限分支必须**排在**统一登出之前 —— 否则"保留会话可恢复"的 UX 直接失效'
+  );
+  // 该分支抛出的错误必须带标记（前端据此区分"重新登录"与"令牌失效"）。
+  const absThrow = body.slice(absIdx, notifyIdx);
+  assert.match(absThrow, /SessionAbsoluteExpired/, '绝对上限分支没有抛出可识别的错误消息');
+  assert.match(absThrow, /readTokenExpiredReason\(response\)/, '绝对上限分支没有带上 tokenExpired 标记');
+  // 反向自检：普通 401 分支仍然照旧登出。
+  assert.match(body.slice(notifyIdx), /notifyUnauthorized\(\);/, '普通 401 的登出丢了');
 });
 
 test('① 401 处理已接线：main.tsx 渲染 AuthBridge，AuthBridge 注册 signOut', () => {

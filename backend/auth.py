@@ -16,6 +16,7 @@ from captcha.image import ImageCaptcha
 
 from config import SECRET_KEY, ALGORITHM, ACCESS_TOKEN_EXPIRE_MINUTES, CAPTCHA_TTL, CAPTCHA_MAX_ERRORS, CAPTCHA_LOCK_MINUTES
 from database import SessionLocal, User
+from utils.token_renewal import origin_auth_claims
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/login")
 
@@ -160,12 +161,18 @@ def authenticate_user(db: Session, username: str, password: str):
 
 
 def create_access_token(data: dict, expires_delta: timedelta = None):
+    """签发访问令牌。
+
+    T-50 / ADR-016：默认有效期改为读 `ACCESS_TOKEN_EXPIRE_MINUTES` 这个**单一来源**
+    （修复前函数内写死 15 分钟，而配置里声明 30 分钟 —— 两者不一致，
+    导致"令牌寿命"无法从一个地方解释，登录端点只能靠显式传参绕开）。
+    同时并入 `jti` 与 `auth_time`：滑动续期要按它们判定绝对上限、并沿用同一条续期链。
+    """
     to_encode = data.copy()
-    if expires_delta:
-        expire = datetime.utcnow() + expires_delta
-    else:
-        expire = datetime.utcnow() + timedelta(minutes=15)
-    to_encode.update({"exp": expire})
+    ttl = expires_delta if expires_delta else timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    now = datetime.utcnow()
+    to_encode.update(origin_auth_claims())
+    to_encode.update({"iat": now, "exp": now + ttl})
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
 

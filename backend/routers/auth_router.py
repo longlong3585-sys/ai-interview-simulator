@@ -99,8 +99,10 @@ async def login(request: Request, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail="用户名或密码错误")
     clear_ip_record(client_ip)
     migrate_password_if_needed(user, password, db)
+    # T-50：把 user_id 一并签进令牌（续期时逐字复制身份，不再回查库拼装），
+    # jti / auth_time 由 create_access_token 统一并入（绝对上限的起算点）。
     access_token = create_access_token(
-        data={"sub": user.username, "role": user.role},
+        data={"sub": user.username, "user_id": user.id, "role": user.role},
         expires_delta=timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     )
     return {"access_token": access_token, "token_type": "bearer", "user_id": user.id, "role": user.role}

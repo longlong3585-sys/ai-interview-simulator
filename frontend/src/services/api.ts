@@ -24,20 +24,18 @@ import { API_BASE_URL } from '../config';
 import {
   ApiError,
   applyRefreshedToken,
+  isAbsoluteExpiryResponse,
   isPublicApiPath,
   isUnauthorizedError,
   readRefreshedToken,
+  readTokenExpiredReason,
 } from './authResponse';
 import type { TokenStorage } from './authResponse';
 
-export {
-  ApiError,
-  AUTH_TOKEN_STORAGE_KEY,
-  REFRESHED_TOKEN_HEADER,
-  isPublicApiPath,
-  isUnauthorizedError,
-  readRefreshedToken,
-} from './authResponse';
+// 统一层对外**转发**认证响应侧的全部常量与判定入口（上层只需要认识 `services/api` 一个模块）。
+// 用 `export *` 而不是逐项列举：`ApiError` / `isPublicApiPath` 等既被本文件 import 使用、
+// 又要对外可见，逐项写会与上面的 import 撞名。
+export * from './authResponse';
 
 /** 令牌读取（与 `AuthContext` 的 `AUTH_STORAGE_KEYS` / `authResponse.AUTH_TOKEN_STORAGE_KEY` 同源）。 */
 const getToken = (): string | null => {
@@ -153,7 +151,20 @@ export async function request(url: string, options: RequestInit = {}): Promise<R
   }
   observeResponse(response);
   if (response.status === 401) {
-    // 统一的 401 语义：**先登出，再抛**。抛出的错误保留 `message === 'Unauthorized'`，
+    // T-50 / ADR-016 R-9：**绝对上限已到**是一种特殊的 401 ——
+    // 服务端会话与面试进度都还在，此时统一登出会把用户"能恢复的进度"变成"必须先登录"。
+    // 因此：先提示（抛一个带标记的错误让上层展示文案），**不调用** notifyUnauthorized()，
+    // 本地会话照旧保留到用户自己重新登录。
+    if (isAbsoluteExpiryResponse(response)) {
+      throw new ApiError(
+        401,
+        url,
+        'SessionAbsoluteExpired',
+        readTokenExpiredReason(response),
+      );
+    }
+    // 其余 401（令牌无效 / 被吊销 / 账号被禁用）语义不变：**先登出，再抛**。
+    // 抛出的错误保留 `message === 'Unauthorized'`，
     // 因为 `useInterviewChat` / `resumeUpload` 里既有的判定依赖这个字符串。
     notifyUnauthorized();
     throw new ApiError(401, url, 'Unauthorized');

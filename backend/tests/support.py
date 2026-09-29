@@ -8,10 +8,14 @@
 
 import os
 import shutil
+import time
 
 from datetime import timedelta
 
+from jose import jwt
+
 from auth import create_access_token
+from config import ALGORITHM, SECRET_KEY
 from database import SessionLocal, User
 
 BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -96,11 +100,48 @@ def create_test_user(username, role="user", is_active=True):
 
 
 def mint_token(username, role="user", minutes=30):
-    """签发测试用 JWT（与生产同一函数、同一密钥）。"""
+    """签发测试用 JWT（与生产同一函数、同一密钥）。
+
+    说明：`create_access_token` 自 T-50 起会并入 `jti` / `auth_time`，
+    因此这里签出的令牌**默认就会自动续期**（30 分钟寿命，签发即剩满额，
+    但测试里若把 `minutes` 调小，跨过半衰点就会带上续期响应头）。
+    绝大多数用例只需要"一个能通过鉴权的令牌"，续期与否无关紧要；
+    需要**精确控制续期行为**的用例请用 `mint_renewable_token`。
+    """
     return create_access_token(
         {"sub": username, "role": role},
         expires_delta=timedelta(minutes=minutes),
     )
+
+
+def mint_renewable_token(username, role="user", minutes=30, age_minutes=0, user_id=None, jti=None):
+    """T-50：签一个**可续期**的令牌，并显式控制"它已经活了多久 / 还能活多久"。
+
+    这是本任务唯一能被测试的办法 —— "剩余有效期 < 50%" 与 "auth_time 超过 8 小时"
+    都需要把签发时刻往回调，而真实等待 8 小时显然不可行。
+
+    参数：
+      * `age_minutes` —— 已经过去的分钟数：`iat = auth_time = now - age`；
+      * `minutes`     —— **总寿命**：`exp = iat + minutes`。
+        因此"剩余时间 = minutes - age_minutes"。要让令牌**仍然有效**，必须
+        `age_minutes < minutes`；`age_minutes > minutes` 就是一枚已过期的令牌。
+
+    例：
+      * 刚签发、剩 29/30 → `minutes=30, age_minutes=1`
+      * 走到半衰点之后（剩 9/30）→ `minutes=30, age_minutes=21`
+      * **超过 8 小时绝对上限但令牌本身仍有效** → `minutes=600, age_minutes=540`
+        （寿命 10 小时、已活 9 小时、还剩 1 小时）
+    """
+    now = int(time.time())
+    issued_at = now - int(age_minutes * 60)
+    payload = {"sub": username, "role": role}
+    if user_id is not None:
+        payload["user_id"] = user_id
+    payload["iat"] = issued_at
+    payload["exp"] = issued_at + int(minutes * 60)
+    payload["auth_time"] = issued_at
+    payload["jti"] = jti or ("t50-%s-%s" % (username, issued_at))
+    return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
 
 
 def bearer(token):

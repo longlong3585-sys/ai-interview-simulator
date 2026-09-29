@@ -15,6 +15,7 @@ from database import SessionLocal, User
 from routers import auth_router, interview, admin, user
 from utils.ai_helpers import load_question_bank
 from utils.log_setup import configure_logging
+from utils.token_renewal_middleware import TokenRenewalMiddleware
 
 configure_logging()
 logger = logging.getLogger("app")
@@ -27,8 +28,24 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["X-Captcha-Id"],
+    # T-50 / ADR-016 第 2 点：**必须**把这两个头列进来，否则跨域下浏览器
+    # 不会把它们交给前端 JS —— 续期令牌"后端发了但前端读不到"，滑动续期静默失效。
+    # 注意：CORS 来源不得配成通配 `*`（credentials 模式下浏览器不允许读通配来源的响应头）；
+    # 本项目已选同源托管（见 docs/33 §5），这里保留显式白名单即可。
+    expose_headers=["X-Captcha-Id", "X-Refreshed-Token", "X-Token-Expired"],
 )
+
+# T-50 / ADR-016：滑动续期 + 8 小时绝对上限。
+#
+# 位置：注册在 CORS **之后** ⇒ Starlette 里"后注册者在外层" ⇒ 实际执行顺序是
+# `ServerError → 续期中间件 → CORS → 路由`。
+# 因此本中间件必须自己处理两件事（否则会绕过 CORS）：
+#   · `OPTIONS` 预检**直接放行**给内层 CORS（预检不带 Authorization，本来也无从续期）；
+#   · 401（绝对上限）**直接返回**，不走内层 —— 这是刻意的：
+#     `X-Token-Expired` 与 `X-Refreshed-Token` 都由 CORS 的 `expose_headers` 暴露，
+#     同源托管下前端读得到；将来若改成分域，需要把本中间件改到 CORS 内层
+#     或显式补 CORS 响应头（`docs/03-tasks.md` 的 T-35 备选）。
+app.add_middleware(TokenRenewalMiddleware)
 
 app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
 

@@ -17,6 +17,17 @@
 /** 后端续期时回传新令牌用的响应头（T-50 / ADR-016 的服务端侧会开始下发）。 */
 export const REFRESHED_TOKEN_HEADER = 'X-Refreshed-Token';
 
+/**
+ * T-50 / ADR-016 R-9：**绝对上限被触发**的标记响应头。
+ *
+ * 为什么需要一个单独的头（而不是只看 401）：两者的**前端处置完全不同** ——
+ *   · 普通 401（令牌无效/被吊销/账号被禁用）→ 本地状态已无意义，统一登出；
+ *   · `X-Token-Expired: absolute` → 会话在**服务端仍然有效**（面试进度还在），
+ *     必须提示"请重新登录"同时**保留本地会话**，不能静默跳登录页丢进度。
+ */
+export const TOKEN_EXPIRED_HEADER = 'X-Token-Expired';
+export const TOKEN_EXPIRED_ABSOLUTE = 'absolute';
+
 // 显式写 `.ts`：`node --test` 直接 import 本文件时，ESM 解析器要求给全扩展名
 // （tsconfig 已开 `allowImportingTsExtensions` + `noEmit`，Vite/tsc 都接受）。
 import { AUTH_TOKEN_STORAGE_KEY } from '../auth/authStorage.ts';
@@ -58,6 +69,23 @@ export function readRefreshedToken(response: { headers?: { get(name: string): st
   return trimmed ? trimmed : null;
 }
 
+/** 从响应里取"绝对上限已触发"的标记。 */
+export function readTokenExpiredReason(
+  response: { headers?: { get(name: string): string | null } | null } | null | undefined,
+): string | null {
+  const raw = response?.headers?.get(TOKEN_EXPIRED_HEADER);
+  if (typeof raw !== 'string') return null;
+  const trimmed = raw.trim();
+  return trimmed ? trimmed : null;
+}
+
+/** 该响应是否表示"会话绝对上限已到"（前端据此**不登出**，只提示重新登录）。 */
+export function isAbsoluteExpiryResponse(
+  response: { headers?: { get(name: string): string | null } | null } | null | undefined,
+): boolean {
+  return readTokenExpiredReason(response) === TOKEN_EXPIRED_ABSOLUTE;
+}
+
 /** 可注入的存储接口（测试里塞一个假的，生产用 localStorage）。 */
 export interface TokenStorage {
   setItem(key: string, value: string): void;
@@ -87,12 +115,20 @@ export function applyRefreshedToken(storage: TokenStorage, token: string | null)
 export class ApiError extends Error {
   readonly status: number;
   readonly url: string;
+  /** T-50：绝对上限被触发时为 `'absolute'`（普通 401 为 `null`）。 */
+  readonly tokenExpired: string | null;
 
-  constructor(status: number, url: string, message?: string) {
+  constructor(status: number, url: string, message?: string, tokenExpired: string | null = null) {
     super(message ?? (status === 401 ? 'Unauthorized' : `HTTP ${status}`));
     this.name = 'ApiError';
     this.status = status;
     this.url = url;
+    this.tokenExpired = tokenExpired;
+  }
+
+  /** 会话绝对上限已到：**不要**登出（服务端会话仍有意义），只提示重新登录。 */
+  get isAbsoluteExpiry(): boolean {
+    return this.tokenExpired === TOKEN_EXPIRED_ABSOLUTE;
   }
 }
 

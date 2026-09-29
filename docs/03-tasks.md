@@ -476,7 +476,7 @@
 
 | ID | 类别 | 任务 | 工时 | 依赖 | 标记 |
 |---|---|---|---|---|---|
-| T-50 | **新功能** | JWT 滑动续期 + **8h 绝对上限** + `auth_time`（ADR-016，**P0**） | 4h | T-36 | ⬜ |
+| T-50 | **新功能** | JWT 滑动续期 + **8h 绝对上限** + `auth_time`（ADR-016，**P0**）—— ✅ 交付见 `docs/36-manual-verification.md` | 4h | T-36 | ✅ |
 | T-51 | **新功能** | `jti` 声明 + `token_blacklist` 真登出（ADR-003 选 B） | 3h | T-22,T-50 | 🔒 |
 | T-52 | **新功能** | 备份脚本 + `backup.timer`（ADR-019） | 2h | T-22 | 🔒 |
 | T-53 | **新功能** | Nginx：**托管 `dist/` + 同源反代 `/api`、`/uploads`** + `/admin` history 回退 + `client_max_body_size 8m` + XFF 转发 + HTTPS/Certbot（ADR-012/015） | 3h | T-34 | ⬜ |
