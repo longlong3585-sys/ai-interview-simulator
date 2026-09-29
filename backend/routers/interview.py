@@ -1,5 +1,6 @@
 import io
 import json
+import logging
 import os
 import uuid
 from typing import Optional
@@ -29,6 +30,8 @@ from database import User, InterviewRecord
 from config import MAX_FILE_SIZE
 
 router = APIRouter(prefix="/api", tags=["interview"])
+
+logger = logging.getLogger("app.interview")
 
 # T-23 / ADR-004：**会话键统一**。
 #
@@ -85,21 +88,28 @@ def _no_session_response() -> JSONResponse:
     )
 
 
-def _session_conflict_response() -> JSONResponse:
-    """T-23：已有活跃会话时的 409（原先会**静默覆盖**上一场）。
+def _session_conflict_response(existing=None) -> JSONResponse:
+    """已有活跃会话时的 409，**直接携带会话摘要**（T-25 / ADR-022 R-10）。
 
-    T-25 会在此基础上补充"过期行自愈"与"409 携带会话摘要"（ADR-022 R-10）。
+    为什么摘要必须放进 409 本体：前端收到 409 时要立刻能给出
+    "**继续上次面试 / 放弃并重新开始**"两个选项。若摘要要另外发一次
+    `GET /api/interview/session` 才能拿到，用户就会先看到一段"你已有面试"
+    的空窗，再等一次往返 —— ADR-022 R-10 明确要求"使前端无需额外一次往返
+    即可恢复"，说的就是这件事。
+
+    `actions` 列出可用的后续动作（T-24 之后这两个接口都已存在）。
     """
-    return JSONResponse(
-        status_code=409,
-        content={
-            "detail": "你已有进行中的面试",
-            "code": "active_session_exists",
-            "hint": "同一时间只能有一场进行中的面试。"
-                    "请先完成它，或稍后使用放弃接口结束它。",
-            "actions": [],
-        },
-    )
+    content = {
+        "detail": "你已有进行中的面试",
+        "code": "active_session_exists",
+        "hint": "同一时间只能有一场进行中的面试。"
+                "你可以继续这一场，或放弃它再重新开始。",
+        "actions": ["get_session", "abandon"],
+    }
+    if existing is not None:
+        # 复用读接口的摘要形状，前端一套代码就能渲染两个入口
+        content["session"] = _session_payload(existing)
+    return JSONResponse(status_code=409, content=content)
 
 
 def _version_conflict_response(latest: Optional[SessionSnapshot]) -> JSONResponse:
@@ -143,9 +153,8 @@ def _finish_session(snapshot: Optional[SessionSnapshot], report) -> None:
                 store.finish(latest.session_id, latest.version, payload,
                              EndedReason.COMPLETED, utcnow_iso())
     except StoreError as exc:
-        import logging
-        logging.getLogger("app.interview").warning(
-            "报告落库/置终态失败（会话 %s）：%s", snapshot.session_id, exc)
+        logger.warning("报告落库/置终态失败（会话 %s）：%s",
+                       snapshot.session_id, exc)
 
 
 # T-13 / FR-4.10：跳过词的**单一来源**。
@@ -291,6 +300,26 @@ async def start_interview(
         questions_list = generate_questions(resume_text)
 
     now = utcnow_iso()
+
+    # ------------------------------------------------------------------
+    # T-25 / ADR-022 R-10：**插入前先自愈过期行**。
+    #
+    # 惰性判定有个时序缺口：一行可能 `expires_at` 已过、`status` 却仍是
+    # `active` —— 它**仍占着** `UNIQUE(user_id) WHERE status='active'` 索引。
+    # 于是会出现自相矛盾的一幕：
+    #     POST /api/start_interview -> 409（"你已有进行中的面试"）
+    #     GET  /api/interview/session -> null（"你没有在面试"）
+    # 用户看到的是"说我有一场面试，又说我没有任何面试"，无从下手。
+    #
+    # 修法：在插入**之前**把该用户所有已过期的 active 行置为 abandoned
+    # （`ended_reason=timeout`），锁自然释放，插入就能成功。
+    # ------------------------------------------------------------------
+    store = get_session_store()
+    healed = store.abandon_expired_for_user(current_user.id, now)
+    if healed:
+        logger.info("start_interview 自愈了 %d 条过期会话（user_id=%s）",
+                    healed, current_user.id)
+
     draft = SessionDraft(
         session_id=uuid.uuid4().hex,
         user_id=current_user.id,
@@ -304,11 +333,12 @@ async def start_interview(
         expires_at=iso_after(SESSION_TTL_SECONDS, now),
     )
     try:
-        snapshot = get_session_store().create(draft)
+        snapshot = store.create(draft)
     except ActiveSessionExists:
-        # T-23：把"静默覆盖上一场面试"变成**显式 409**。
-        # T-25 会在此前先做"过期行自愈"，并把会话摘要放进 409 响应体。
-        return _session_conflict_response()
+        # 到这里说明**确实**有一场未过期的活跃面试（过期行上面已经自愈了）。
+        # T-25：409 直接带上会话摘要，前端无需额外往返即可展示
+        # "继续上次面试 / 放弃并重新开始"（ADR-022 R-10）。
+        return _session_conflict_response(store.get_active(current_user.id, utcnow_iso()))
     except StoreError as exc:
         raise HTTPException(status_code=500, detail="创建面试会话失败：%s" % exc)
 
