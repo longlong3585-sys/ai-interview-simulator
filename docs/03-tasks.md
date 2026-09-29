@@ -337,7 +337,7 @@
 
 | ID | 类别 | 任务 | 工时 | 依赖 | 标记 |
 |---|---|---|---|---|---|
-| T-34 | **修复 Bug** | API 基地址改**相对路径** + Vite `server.proxy` + `VITE_API_BASE_URL`（Bug 4，**P0**） | 2h | — | ⬜ |
+| T-34 | **修复 Bug** | API 基地址改**相对路径** + Vite `server.proxy` + `VITE_API_BASE_URL`（Bug 4，**P0**） | 2h | — | ✅ |
 | T-35 | **修复 Bug** | CORS 允许来源配置化，`expose_headers` 加 `X-Refreshed-Token`（NFR-10a） | 1h | T-34 | ⬜ |
 | T-36 | **新功能** | api 层收敛：**24 处裸 `fetch` 全部迁入**统一层（ADR-016 前置） | 4h | T-03,T-34 | ⬜ |
 | T-37 | **新功能** | Toast 组件 + 全局错误呈现（**禁用 `alert`**）（NFR-13） | 3h | T-03 | ⬜ |
@@ -427,6 +427,33 @@
 - 报告：`docs/32-manual-verification.md`
 - 现状：全树仍 30 个 `.ts/.tsx`（新增 `questionBankEntry.ts` 与删除 `QuestionBank.tsx` 相抵）；
   契约测试 62 → **76 项**；`npm run lint` 43 → **42 errors**（少了 `_passwordError` 那条 unused-vars）
+
+**T-34 交付与验证（2026-09-30，P0 / Bug 4）**
+
+- 修复：`src/config.ts` 硬编码的**本机绝对地址** → **默认相对路径**（空串）。
+  同时消灭三个必然的线上故障：HTTPS 页面的混合内容拦截、换域名后的跨域、
+  host 被内联进产物导致"换环境必须重新构建前端"
+- 交付物（前端）：
+  - `src/utils/apiBaseUrl.ts`（新增）：`normalizeApiBaseUrl()` 零依赖纯函数
+    （空值/空白→`''`、末尾斜杠归一），因此行为能被 Node 直接单测
+  - `src/config.ts`：`normalizeApiBaseUrl(import.meta.env.VITE_API_BASE_URL)`；
+    **连注释里都不写旧地址字面量**（tsc 产物保留注释，`minify=false` 时 vite 产物也保留，
+    验收标准不能靠压缩器兜底）
+  - `vite.config.ts`：`server.proxy` + **`preview.proxy`**（`/api` 与 `/uploads`，
+    `changeOrigin`，目标默认本机 8000，`DEV_PROXY_TARGET` 可覆盖，`loadEnv` 读 `.env*`）
+  - `.env.example`（新增）：环境变量模板，示范"留空 = 相对路径"并警告混合内容
+- 契约测试：`frontend/tests/api-base-url.test.mjs`（9 项：纯逻辑行为 + 接线 + 产物口径，
+  含 2 组判别力自检）；`frontend/tests/api-parity.test.mjs` **解禁 config.ts**
+  （原来那句"待 T-34 修复后再纳入强制"已兑现），并改为**去注释**后判定
+- 一键验收：`cd backend; .\venv\Scripts\python.exe scripts\verify_t34_manual.py`
+  （C 段含**运行时求值 vite.config.ts**（Node 24 直接 import .ts）与**离线打包模拟**：
+  tsc 真编译 + 模拟 Vite define 替换 + grep 产物 + 反向验证替换生效）
+- 报告：`docs/33-manual-verification.md`
+- 现状：契约测试 76 → **85 项**；`tsc -b` exit 0；lint 仍 42 errors（无新增）；
+  T-44/T-45 与 T-46~T-49 的验收脚本仍退出码 0
+- 有意后果（已登记给后续任务）：相对路径意味着**生产必须同源托管**
+  （Nginx 反代 + `/admin` 的 history 回退）→ **T-53 / T-54**；
+  若将来要前后端分域，需设 `VITE_API_BASE_URL` 并由 **T-35** 把 CORS 允许来源配置化
 
 ---
 

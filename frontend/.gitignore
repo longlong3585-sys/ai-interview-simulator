@@ -12,6 +12,11 @@ dist
 dist-ssr
 *.local
 
+# 验收脚本的临时产物（verify_t34_manual.py 的离线打包模拟 / 运行时配置求值）
+# 正常跑完会自己清掉；万一中途崩了，别让它污染 git status。
+.tmp-t34-emit/
+.tmp-t34-probe.mjs
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

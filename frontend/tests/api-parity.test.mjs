@@ -61,11 +61,21 @@ function collectBackendRoutes() {
   return routes;
 }
 
+/** 去掉注释：注释里会**引用**接口路径（"这里打 /api/xxx"）与旧地址，那不是调用。
+ *  T-34 起本文件因此改为"看代码不看注释"——否则解释 Bug 4 的注释会把护栏变成假警报。 */
+function stripComments(source) {
+  return source
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .split(/\r?\n/)
+    .map((line) => (line.trim().startsWith('//') ? '' : line.replace(/\s\/\/.*$/, '')))
+    .join('\n');
+}
+
 /** 收集前端调用的 API 路径。 */
 function collectFrontendPaths() {
   const paths = new Set();
   for (const file of walk(SRC_DIR, (n) => /\.(ts|tsx)$/.test(n))) {
-    const src = readFileSync(file, 'utf8');
+    const src = stripComments(readFileSync(file, 'utf8'));
     // 形如 `${API_BASE_URL}/api/xxx` 或 `${API_BASE_URL}${someVar}`
     for (const m of src.matchAll(/\$\{API_BASE_URL\}(\/api\/[^`'"\s)]*)/g)) {
       paths.add(normalize(m[1]));
@@ -116,15 +126,15 @@ test('匹配器具备判别力（防止"什么都匹配"导致假通过）', () 
 test('前端 API 路径不得残留硬编码的 host', () => {
   const offenders = [];
   for (const file of walk(SRC_DIR, (n) => /\.(ts|tsx)$/.test(n))) {
-    const src = readFileSync(file, 'utf8');
+    const src = stripComments(readFileSync(file, 'utf8'));
     if (/https?:\/\/127\.0\.0\.1/.test(src)) offenders.push(path.relative(REPO_ROOT, file));
   }
-  // 注：config.ts 的默认值属于 Bug 4 / T-34 的修复范围，此处先记录事实，
-  // 待 T-34 修复后本测试将把 config.ts 一并纳入强制。
-  const offendersExcludingConfig = offenders.filter((f) => !f.endsWith('config.ts'));
+  // T-34 起本规则**不再豁免 config.ts**（原来那句"待 T-34 修复后再纳入"已经兑现）：
+  // API 基地址默认是空串（相对路径）；写死 host 会让 HTTPS 页面被混合内容拦死、
+  // 换域名后全站 CORS，且地址被内联进产物、换环境必须重新构建。
   assert.deepEqual(
-    offendersExcludingConfig,
+    offenders,
     [],
-    `除 config.ts 外不应有文件硬编码 127.0.0.1：${JSON.stringify(offendersExcludingConfig)}`
+    `不应有文件硬编码 127.0.0.1：${JSON.stringify(offenders)}`
   );
 });
