@@ -827,8 +827,10 @@ function App() {
       const res = await authFetch('/api/generate_report', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        // T-11 / FR-4.9：移除死参数 user_id（后端从不读取，身份来自 JWT）
-        body: JSON.stringify({ messages: currentMessages })
+        // T-26 / Bug 3A：**不再发送 messages**（也不再发送任何 body）。
+        // 后端改为以**服务端会话**为唯一事实来源：题目、候选人回答、作答状态
+        // 都在会话里。这既修掉了"超时后前端状态与真实作答对不上"的脱节，
+        // 也让评分输入不再受客户端影响（此前可以删改聊天记录来影响评分）。
       });
       const data = await res.json();
       setReport(data);

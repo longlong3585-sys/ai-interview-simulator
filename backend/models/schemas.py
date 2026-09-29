@@ -34,7 +34,3 @@ class ProfileUpdate(BaseModel):
     birthday: Optional[date] = None
 
 
-class ReportRequest(BaseModel):
-    messages: list
-    # T-11：user_id 已移除 —— 后端从未读取（generate_report 只用 req.messages
-    # 与 current_user.id 定位会话）。保留会造成"可指定他人"的误导。

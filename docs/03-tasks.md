@@ -66,6 +66,10 @@
 | T-20 | ✅ 已完成 | 2026-09-29 | `0bd9779` | `services/stores/sqlite_captcha_store.py`：`CaptchaStore` 的 3 个方法；装配点扩为 `_REGISTRY` 表驱动。**核心改进**：原实现是内存字典（多 worker 下各存一份 → 登录随机失败），且"读→判断→写"有 TOCTOU 缝隙；本实现用**单条 UPDATE** 同时完成"存在 + 未用 + 未过期 + 码匹配 + 消费"，`rowcount==1` 才算成功 → **原子**。**32 项测试**；**10 个探针全部被抓住**（其中 1 个首轮"漏网"→ 发现那个提前返回是**安全判定**而非优化，已补 fail-open 用例）。**无需迁移** |
 | T-21 | ✅ 已完成 | 2026-09-29 | `badbe83` | `services/stores/sqlite_rate_limit_store.py`（仅失败计数 / 滑动窗口）+ **`utils/client_ip.py`（X-Forwarded-For 信任链解析）**。⚠️ **修掉一个必现的线上缺陷**：原实现用 `request.client.host`，在 Nginx 后面那是**代理 IP** → 所有用户共用同一个限流键 → **一人连错 5 次锁死全网**。IP 解析取 **XFF 最右**（Nginx 亲自追加的那段），最左是客户端可伪造的；链长不足/非法 IP 一律退回直连对端（fail-closed）。**49 项测试**；**12 个探针全部被抓住**。装配点新增一行 `_REGISTRY`，`_assemble` 零改动。**无需迁移** |
 | T-22 | ✅ 已完成 | 2026-09-29 | 见 git log | `scripts/cleanup.py`（单次执行 + 单实例文件锁 + `--dry-run`）+ `deploy/systemd/cleanup.{service,timer}` + 部署 README。清理三类：过期会话置 `abandoned`（**不删除** —— ADR-007R 要求超时后仍要出报告）、过期验证码删除、窗口外失败记录删除；三个动作全部走 `services/stores` 协议。**单实例两层保障**：`O_CREAT\|O_EXCL` 文件锁（跨平台，Windows 手动跑也生效）+ systemd `Type=oneshot`。⚠️ **首版两个真实 bug 已修并有回归用例**：① `--db` 曾失效（`database.py` 在 import 期就读走 `DATABASE_URL`，改环境变量无效）→ 改为显式构造 engine；② 会话过期判据曾多减一次 TTL（`now-2h`）→ **过期会话要再等 2 小时才释放唯一锁**，正好废掉 ADR-022R 的承诺。**30 + 17 项测试**（含 systemd 单元静态检查）；**15 个探针全部被抓住**。**无需迁移** |
+| T-23 | ✅ 已完成 | 2026-09-29 | `c98e544` + `ca19592` | `routers/interview.py` 的进程内字典 `interview_sessions: Dict[int, Dict]` 换成持久化 `SessionStore`：会话以 **UUID `session_id`** 为键，`user_id` 只用于"找该用户当前活跃会话"；`/api/chat` 无会话 → **409 + 指引**（不再静默降级为通用 AI 对话 —— Bug 1 白嫖路径的另一条）。AI 调用在事务外、写回用乐观锁 `TurnCommit`，冲突 409 且**不重试**（重放会串题）。⚠️ **实现中途撞上一个必现死锁**：`get_current_user` 的只读事务在**全局** `BEGIN IMMEDIATE` 下持有写锁到请求结束 → 同请求内 `store.create()` 等满 15s 后 `database is locked`。按用户裁决改**选项 B**（T-15 修订：IMMEDIATE 只放在显式写方法里），拒绝"`expunge` + 必须记得 `merge`"的隐性技术债。**18 项测试**；**破坏性验证：探针全部被抓住**。**交付物**：`scripts/verify_t23_manual.py` |
+| T-24 | ✅ 已完成 | 2026-09-30 | `ed8728e` | 新增 **`GET /api/interview/session`**（返回 `{"session": 摘要\|null}`，无会话时 200+null 而**不是** 404 —— 刷新页面是正常操作，不该报错）+ **`POST /api/interview/abandon`**（`abandoned`/`manual`，写失败重试一次；放弃后唯一锁立刻释放，可马上开新面试）。摘要**不含** `user_id`/`report`（不泄露他人标识与历史报告）。**18 项测试**；**破坏性验证：探针全部被抓住**。**交付物**：`scripts/verify_t24_manual.py` |
+| T-25 | ✅ 已完成 | 2026-09-30 | `f0c2d86` | **过期行自愈**（ADR-022 R-10）：`start_interview` 在建新会话**之前**先 `abandon_expired_for_user()`。修掉的那一幕自相矛盾是必现的：`GET session -> null`（没在面试）同时 `POST start_interview -> 409`（你已有面试），用户完全无从下手。真正冲突时 409 **直接携带会话摘要**（`session_id`/`current_index`/`last_seq`/`total`/`remaining_seconds` + `actions`），前端无需额外一次往返即可给出"继续上次 / 放弃重开"。**14 项测试**；**破坏性验证：探针全部被抓住**。**交付物**：`scripts/verify_t25_manual.py` |
+| T-26 | ✅ 已完成 | 2026-09-30 | 见 git log | 报告改以**服务端会话**为准：`_build_transcript()` 从 `questions` + `user_answers` + `question_status` 重建对话记录，未答题标 `[尚未作答]`、跳过的题标 `[跳过此题]`、各题状态（answered/skipped/pending）一并下发给评分；`generate_report` **不再接收任何请求体**（`ReportRequest` 类已从 `schemas.py` 删除，前端不再发送 `messages`），无活跃会话 → 409 `no_active_session`。修掉三条路径：① **评分输入可被伪造**（前端删改聊天记录就能影响评分，可自证清白）；② Bug 3A 根因之一（超时后前端状态已乱，传上来的 messages 与真实作答对不上）；③ **白嫖**（没有会话也能凭 messages 换一份"报告"）。**12 项测试**（含"伪造 messages 不得进入 prompt"的核心断言）；**破坏性验证：7 个探针全部被抓住**（首轮 3 个 INVALID 是探针自身的换行符问题，已修）。**交付物**：`scripts/verify_t26_manual.py`（自起服务 + **本机假 AI**，全程不联网、不花钱，可检查真正喂给模型的 prompt） |
 
 > **⚠️ 操作教训（T-05 真机验证时踩到，务必记住）**
 > `job_kill` **只杀 pwsh 包装进程，不会杀 uvicorn 的 python 子进程**。残留进程会继续占着 8000 端口，导致：
@@ -89,6 +93,21 @@
 > 1. 任何会**改库或改文件**的真机验证，**必须先用 `tests/support.py` 造临时用户**，用完即删；
 > 2. 涉及"删除旧文件"这类破坏性逻辑时，验证对象**只能是**自己造的临时数据；
 > 3. T-01 的回滚备份不仅能救代码，也能救**用户数据** —— 本例即由它挽回。
+
+> **⚠️ 工具链教训（T-26 时踩到，与业务无关但会伪装成业务故障）**
+> 本项目工作区的换行符约定是 **LF**（`git status` 里所有未改动文件都是 LF）。
+> 但 Windows 上的文本编辑工具会把**整个文件**改写成 **CRLF** ——
+> 本次 `routers/interview.py`、`models/schemas.py`、`frontend/src/App.tsx`
+> 就在编辑后变成了全文件 CRLF（文件行数不减、`git diff` 也只显示真实改动，
+> 因为 `core.autocrlf=true` 在 diff/commit 时会归一化 —— 所以**看不出来**）。
+> **后果**：`frontend/tests/skip-words-parity.test.mjs` 里有一条断言用
+> `/def _is_skip_message[\s\S]*?\n\n/` 匹配**原始文件字节**，在 CRLF 下
+> `\n\r\n` 里凑不出 `\n\n` → 报"未找到 _is_skip_message 函数"，
+> 而这个函数明明就在原处。**故障现象指向完全无关的地方**，极易误判成业务回归。
+> **处置**：① 断言改为 `\r?\n\r?\n`（它只想验证"函数体引用了 SKIP_WORDS"，
+> 与换行无关）；② 把被改写的文件按字节还原为 LF。
+> **记住**：改完之后若前端契约测试报"找不到某个明明存在的函数"，
+> **先怀疑换行符**，用 `[System.IO.File]::ReadAllBytes` 数一下 CRLF 个数。
 
 ---
 
@@ -280,14 +299,14 @@
 
 ---
 
-## 阶段 3 · Bug 修复 🔒（依赖阶段 2）
+## 阶段 3 · Bug 修复 ✅ 进行中（T-23 ~ T-26 完成）
 
 | ID | 类别 | 任务 | 工时 | 依赖 | 标记 |
 |---|---|---|---|---|---|
-| T-23 | **修复 Bug** | 会话键统一 + 无会话返回 **409 + 指引**（Bug 1 收口） | 3h | T-19 | 🔒 |
-| T-24 | **修复 Bug** | 新增 `GET /api/interview/session` + `POST /api/interview/abandon`（Bug 2） | 4h | T-19 | 🔒 |
-| T-25 | **修复 Bug** | `start_interview` 唯一入口 + 过期行自愈 + 409 携带会话摘要（Bug 2） | 3h | T-24 | 🔒 |
-| T-26 | **修复 Bug** | 报告改以**服务端会话**为准，前端不再传 `messages`（Bug 3A） | 3h | T-24 | 🔒 |
+| T-23 | **修复 Bug** | 会话键统一 + 无会话返回 **409 + 指引**（Bug 1 收口） | 3h | T-19 | ✅ |
+| T-24 | **修复 Bug** | 新增 `GET /api/interview/session` + `POST /api/interview/abandon`（Bug 2） | 4h | T-19 | ✅ |
+| T-25 | **修复 Bug** | `start_interview` 唯一入口 + 过期行自愈 + 409 携带会话摘要（Bug 2） | 3h | T-24 | ✅ |
+| T-26 | **修复 Bug** | 报告改以**服务端会话**为准，前端不再传 `messages`（Bug 3A） | 3h | T-24 | ✅ |
 | T-27 | **修复 Bug** | 评分提示词区分"未及作答/答不上" + 报告新增 `ended_reason`（FR-4.5） | 3h | T-26 | 🔒 |
 | T-28 | **修复 Bug** | 后端超时兜底：会话置 `abandoned`，**释放唯一锁**（FR-4.12） | 2h | T-19 | 🔒 |
 | T-29 | **修复 Bug** | 修复 admin 启动竞态（`init_db.py` + `ExecStartPre`） | 2h | T-14 | 🔒 |

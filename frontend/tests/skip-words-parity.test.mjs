@@ -123,7 +123,11 @@ test('后端确实提供了 /api/interview/config 路由并返回 skip_words', (
 });
 
 test('跳过词判定与下发的常量同源（都引用 SKIP_WORDS）', () => {
-  const m = pySource.match(/def _is_skip_message[\s\S]*?\n\n/);
+  // 换行一律写成 `\r?\n`：这个断言只看"函数体里有没有引用 SKIP_WORDS"，
+  // 与换行符无关。写成 `\n\n` 会让**任何**把文件存成 CRLF 的编辑器
+  // （Notepad、甚至某些工具链）把它变成一条假警报 —— 断言本身没错，
+  // 但报出来的原因会指向完全无关的地方（曾经真的踩过一次）。
+  const m = pySource.match(/def _is_skip_message[\s\S]*?\r?\n\r?\n/);
   assert.ok(m, '未找到 _is_skip_message 函数');
   assert.ok(
     /SKIP_WORDS/.test(m[0]),

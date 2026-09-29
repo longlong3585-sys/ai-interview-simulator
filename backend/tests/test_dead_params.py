@@ -19,7 +19,7 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 import main  # noqa: E402  —— 环境隔离由 tests/__init__.py 保证
-from models.schemas import ChatRequest, ReportRequest
+from models.schemas import ChatRequest
 from tests.support import bearer, create_test_user, delete_users, mint_token
 
 USERNAME = "t11_user"
@@ -41,10 +41,15 @@ class DeadParamSchemaTests(unittest.TestCase):
         self.assertNotIn("resume_questions", fields)
         self.assertEqual(fields, {"message"})
 
-    def test_report_request_has_no_dead_fields(self):
-        fields = set(ReportRequest.model_fields)
-        self.assertNotIn("user_id", fields, "ReportRequest.user_id 应已移除")
-        self.assertEqual(fields, {"messages"})
+    def test_report_request_model_is_gone(self):
+        """T-26：`ReportRequest` 整个删除了 —— `/api/generate_report` 不再接收请求体。
+
+        评分输入改为**服务端会话**，契约为空体。留一个空模型只会让人
+        以为"还是可以传点什么"，所以直接移除。
+        """
+        import models.schemas as schemas
+        self.assertFalse(hasattr(schemas, "ReportRequest"),
+                         "ReportRequest 应已删除（generate_report 不再接收请求体）")
 
     def test_extra_fields_are_ignored_not_rejected(self):
         """旧客户端仍发送死参数时不得 422（向后兼容）。"""
@@ -112,25 +117,31 @@ class DeadParamEndpointTests(unittest.TestCase):
         # 伪造的 user_id 未创建任何会话
         self.assertIsNone(get_session(123456))
 
-    def test_generate_report_works_without_user_id(self):
-        r = self.client.post(
-            "/api/generate_report",
-            json={"messages": [{"role": "user", "content": "答"}, {"role": "assistant", "content": "问"}]},
-            headers=bearer(self.token),
-        )
-        # AI 可能不可用（返回降级结果），但契约层不应因缺少 user_id 而 4xx/5xx
-        self.assertIn(r.status_code, (200, 503), r.text)
+    def test_generate_report_no_longer_takes_messages(self):
+        """T-26 / Bug 3A：评分改以**服务端会话**为准，请求体不再被使用。
 
-    def test_generate_report_tolerates_legacy_user_id(self):
+        因此"没有进行中的会话"时应当 409 —— 修复前它能凭空拿前端传来的
+        messages 生成一份报告，是又一条白嫖 AI 的路径，且评分输入可被伪造。
+        """
         r = self.client.post(
             "/api/generate_report",
-            json={
-                "messages": [{"role": "user", "content": "答"}],
-                "user_id": 123456,
-            },
+            json={"messages": [{"role": "user", "content": "答"},
+                               {"role": "assistant", "content": "问"}]},
             headers=bearer(self.token),
         )
-        self.assertIn(r.status_code, (200, 503), r.text)
+        self.assertEqual(r.status_code, 409, r.text)
+        self.assertEqual(r.json()["code"], "no_active_session")
+
+    def test_generate_report_ignores_legacy_fields(self):
+        """遗留的 `user_id` / `messages` 一律忽略；身份仍按令牌解析。"""
+        r = self.client.post(
+            "/api/generate_report",
+            json={"messages": [{"role": "user", "content": "答"}],
+                  "user_id": 123456},
+            headers=bearer(self.token),
+        )
+        self.assertEqual(r.status_code, 409, r.text)
+        self.assertEqual(r.json()["code"], "no_active_session")
 
 
 if __name__ == "__main__":

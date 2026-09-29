@@ -12,7 +12,7 @@ from docx import Document
 from sqlalchemy.orm import Session
 
 from auth import get_db, get_current_user, get_current_admin_user, require_user
-from models.schemas import ChatRequest, ReportRequest, SaveInterviewRequest
+from models.schemas import ChatRequest, SaveInterviewRequest
 from services.stores.base import (
     ActiveSessionExists,
     EndedReason,
@@ -484,24 +484,68 @@ def abandon_interview_session(current_user: User = Depends(require_user)):
     }
 
 
-@router.post("/generate_report")
-async def generate_report(req: ReportRequest, current_user: User = Depends(require_user)):
-    transcript = "\n".join([f"{m['role']}: {m['content']}" for m in req.messages])
-    user_msgs = [m['content'] for m in req.messages if m['role'] == 'user']
-    ai_msgs = [m['content'] for m in req.messages if m['role'] == 'assistant']
-    question_count = len(ai_msgs)
+def _build_transcript(snapshot: SessionSnapshot):
+    """从**服务端会话**重建面试对话记录（T-26）。
 
-    # T-23：会话状态改从持久化存储读（原先读进程内字典）。
-    # 注意：**评分输入仍以前端传来的 messages 为准** ——
-    # "改为以服务端会话为准"是 T-26 的契约变更，不在本任务范围。
+    返回 `(transcript, question_count)`。
+
+    修复前这里直接用 `req.messages` —— 也就是**前端传来的聊天记录**。问题：
+      1. 前端可以任意伪造/删减对话，直接影响评分结果（可自证清白）；
+      2. Bug 3A：超时自动结束时前端状态可能已经乱了，传上来的 messages
+         与真实作答对不上，报告与进度脱节；
+      3. `generate_report` 因此无法在"服务端自己知道发生了什么"的前提下工作，
+         而 ADR-007R 的"区分未及作答 / 答不上"必须建立在这个前提上。
+
+    现在以会话为唯一事实来源：`questions` 是出题清单，`user_answers` 是
+    候选人实际提交的回答，`question_status` 标明每题是 answered/skipped/pending。
+    重建出来的形态与原先前端传来的那份基本一致（面试官问 -> 候选人答），
+    但**不再受客户端影响**。
+
+    注意：这里**不**把 AI 每轮给出的短评拼进去 —— 那些评语不参与打分，
+    会话里也没有单独存（`last_reply` 只保留最后一条）。评分真正需要的是
+    "题目 + 候选人回答 + 回答状态"，这三样会话全都有。
+    """
+    lines = []
+    for i, question in enumerate(snapshot.questions):
+        status = (snapshot.question_status[i]
+                  if i < len(snapshot.question_status) else "pending")
+        answer = (snapshot.user_answers[i]
+                  if i < len(snapshot.user_answers) else None)
+        lines.append("assistant: %s" % question)
+        if status == "skipped":
+            lines.append("user: [跳过此题]")
+        elif status == "pending" or not answer:
+            # 未作答：不编造内容，如实标注 —— ADR-007R 要求区分
+            # "未及作答"与"答不上"，此处只如实呈现事实（具体评分口径属 T-27）。
+            lines.append("user: [尚未作答]")
+        else:
+            lines.append("user: %s" % answer)
+    return "\n".join(lines), len(snapshot.questions)
+
+
+@router.post("/generate_report")
+async def generate_report(current_user: User = Depends(require_user)):
+    """T-26 / Bug 3A：评分**以服务端会话为准**，请求体不再接收 `messages`。
+
+    契约变更：请求体从 `{"messages": [...]}` 变成**空体**（甚至可以不传 body）。
+    前端不再有机会影响评分输入。
+    """
     snapshot = _active_session(current_user.id)
+    if snapshot is None:
+        # 与 /api/chat 同口径：没有进行中的面试就没有报告可评。
+        # 修复前这里能凭空拿前端传来的 messages 生成一份"报告"，
+        # 是又一条白嫖 AI 的路径。
+        return _no_session_response()
+
+    transcript, question_count = _build_transcript(snapshot)
     question_status_note = ""
-    if snapshot:
-        slist = []
-        for i, q in enumerate(snapshot.questions):
-            st = snapshot.question_status[i]
-            slist.append(f"  Q{i+1}: {q} -> {st}")
-        question_status_note = "\n## 各问题回答状态：\n" + "\n".join(slist) + "\n（answered=已回答, skipped=跳过, pending=未答）请参考这些状态调整评分。"
+    slist = []
+    for i, q in enumerate(snapshot.questions):
+        st = snapshot.question_status[i]
+        slist.append(f"  Q{i+1}: {q} -> {st}")
+    question_status_note = ("\n## 各问题回答状态：\n" + "\n".join(slist) +
+                            "\n（answered=已回答, skipped=跳过, pending=未答）"
+                            "请参考这些状态调整评分。")
 
     prompt = f"""你是一位极其严格的技术面试评估专家。请根据以下面试对话，对候选人进行冷酷、真实的评估。
 
