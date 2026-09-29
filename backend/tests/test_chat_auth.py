@@ -15,7 +15,6 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 import main  # noqa: E402  —— 环境隔离由 tests/__init__.py 保证
-from routers.interview import interview_sessions
 from tests.support import bearer, create_test_user, delete_users, mint_token
 
 QUESTIONS = ["Q1 项目经历？", "Q2 技术栈？", "Q3 难点？"]
@@ -43,7 +42,7 @@ def _fake_ai_create(*args, **kwargs):
 
 
 def _seed_session(user_id, current_index=0):
-    interview_sessions[user_id] = {
+    seed_session(user_id, {
         "user_id": user_id,
         "role": "后端开发",
         "questions": list(QUESTIONS),
@@ -51,7 +50,7 @@ def _seed_session(user_id, current_index=0):
         "question_status": ["pending"] * len(QUESTIONS),
         "user_answers": [""] * len(QUESTIONS),
         "finished": False,
-    }
+    })
 
 
 class ChatAuthTests(unittest.TestCase):
@@ -66,7 +65,7 @@ class ChatAuthTests(unittest.TestCase):
         cls.client.__exit__(None, None, None)
 
     def setUp(self):
-        interview_sessions.clear()
+        clear_sessions()
         self.id_a = create_test_user(USER_A, role="user")
         self.id_b = create_test_user(USER_B, role="user")
         create_test_user(USER_ADMIN, role="admin")
@@ -74,7 +73,7 @@ class ChatAuthTests(unittest.TestCase):
         self.token_admin = mint_token(USER_ADMIN, role="admin")
 
     def tearDown(self):
-        interview_sessions.clear()
+        clear_sessions()
         delete_users([USER_A, USER_B, USER_ADMIN])
 
     def _post_chat(self, body, token=None):
@@ -121,18 +120,18 @@ class ChatAuthTests(unittest.TestCase):
 
         self.assertEqual(r.status_code, 200, r.text)
 
-        sess_a = interview_sessions[self.id_a]
-        sess_b = interview_sessions[self.id_b]
+        sess_a = get_session(self.id_a)
+        sess_b = get_session(self.id_b)
 
         # A 的会话被推进
-        self.assertEqual(sess_a["current_index"], 1, "A 的会话未被推进")
-        self.assertEqual(sess_a["question_status"][0], "answered")
-        self.assertEqual(sess_a["user_answers"][0], "我是 A 的回答")
+        self.assertEqual(sess_a.current_index, 1, "A 的会话未被推进")
+        self.assertEqual(sess_a.question_status[0], "answered")
+        self.assertEqual(sess_a.user_answers[0], "我是 A 的回答")
 
         # B 的会话必须完全没被动过 —— 这是修复前最严重的串号问题
-        self.assertEqual(sess_b["current_index"], 0, "B 的会话被伪造请求推进了！")
-        self.assertEqual(sess_b["question_status"][0], "pending", "B 的题目状态被改写！")
-        self.assertEqual(sess_b["user_answers"][0], "", "B 的作答被覆盖！")
+        self.assertEqual(sess_b.current_index, 0, "B 的会话被伪造请求推进了！")
+        self.assertEqual(sess_b.question_status[0], "pending", "B 的题目状态被改写！")
+        self.assertEqual(sess_b.user_answers[0], "", "B 的作答被覆盖！")
 
     def test_forged_user_id_does_not_change_response_identity(self):
         """伪造 user_id 时，响应里的 current_index 必须取自令牌用户自己的会话。
@@ -163,7 +162,7 @@ class ChatAuthTests(unittest.TestCase):
         with patch("routers.interview.client.chat.completions.create", side_effect=_fake_ai_create):
             r = self._post_chat({"message": "回答"}, token=self.token_a)
         self.assertEqual(r.status_code, 200)
-        self.assertEqual(interview_sessions[self.id_a]["current_index"], 1)
+        self.assertEqual(get_session(self.id_a).current_index, 1)
 
     def test_unknown_extra_body_fields_are_tolerated(self):
         """Pydantic 默认忽略多余字段：旧前端仍发送 user_id 不应导致 422。"""
@@ -178,3 +177,45 @@ class ChatAuthTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+# --- T-23：会话改为经持久化存储读写（原先直接操作 `interview_sessions` 字典）---
+
+def seed_session(user_id, d):
+    """按旧字典的形状造一条会话，返回快照。"""
+    import uuid
+    from services.stores.base import SessionDraft, iso_after, utcnow_iso
+    from services.stores.factory import get_session_store
+
+    now = utcnow_iso()
+    questions = d.get("questions") or ["T23 占位题"]
+    draft = SessionDraft(
+        session_id=d.get("session_id") or uuid.uuid4().hex,
+        user_id=user_id,
+        role=d.get("role", "后端开发"),
+        questions=list(questions),
+        question_status=list(d.get("question_status",
+                                   ["pending"] * len(questions))),
+        user_answers=list(d.get("user_answers", [None] * len(questions))),
+        current_index=d.get("current_index", 0),
+        created_at=now, updated_at=now, expires_at=iso_after(7200, now),
+    )
+    return get_session_store().create(draft)
+
+
+def get_session(user_id):
+    """取该用户当前活跃会话的快照；没有返回 None。"""
+    from services.stores.base import utcnow_iso
+    from services.stores.factory import get_session_store
+    return get_session_store().get_active(user_id, utcnow_iso())
+
+
+def clear_sessions():
+    """清掉测试用户的所有会话（等价于旧的 `interview_sessions.clear()`）。
+
+    直接删表内容而不是逐个 abandon —— 测试要的是"干净起点"。
+    """
+    from sqlalchemy import text
+    import database
+    with database.engine.begin() as conn:
+        conn.execute(text("DELETE FROM interview_sessions"))

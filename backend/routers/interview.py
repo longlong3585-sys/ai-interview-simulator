@@ -1,15 +1,28 @@
 import io
 import json
 import os
-from typing import Dict
+import uuid
+from typing import Optional
 
 from fastapi import APIRouter, UploadFile, File, Form, Depends, HTTPException
+from fastapi.responses import JSONResponse
 from PyPDF2 import PdfReader
 from docx import Document
 from sqlalchemy.orm import Session
 
 from auth import get_db, get_current_user, get_current_admin_user, require_user
 from models.schemas import ChatRequest, ReportRequest, SaveInterviewRequest
+from services.stores.base import (
+    ActiveSessionExists,
+    EndedReason,
+    SessionDraft,
+    SessionSnapshot,
+    StoreError,
+    TurnCommit,
+    iso_after,
+    utcnow_iso,
+)
+from services.stores.factory import get_session_store
 from utils.ai_helpers import client, extract_json_from_response, generate_questions, clean_resume_text
 from utils.safe_json import safe_json_loads
 from database import User, InterviewRecord
@@ -17,10 +30,122 @@ from config import MAX_FILE_SIZE
 
 router = APIRouter(prefix="/api", tags=["interview"])
 
-interview_sessions: Dict[int, Dict] = {}
+# T-23 / ADR-004：**会话键统一**。
+#
+# 修复前这里是 `interview_sessions: Dict[int, Dict] = {}` —— 一个进程内字典，
+# 以 `user_id` 为键。三个问题：
+#   1. **静默覆盖**：同一用户再次 start 会直接覆盖上一场面试，没有任何提示；
+#   2. **多 worker 各存一份**：ADR-006 的部署是 `--workers 2`，
+#      请求落到另一个 worker 就"没有会话"，刷新即丢失进度（Bug 2 的根因之一）；
+#   3. **重启即清空**。
+# 现在统一为持久化的 `SessionStore`：会话以 **UUID `session_id`** 为键，
+# `user_id` 只用来"找该用户当前活跃的会话"；冲突由
+# `UNIQUE(user_id) WHERE status='active'` 部分唯一索引变成**显式 409**。
+#
+# 注意：**前端契约本次不变** —— 路由仍按"当前登录用户的活跃会话"定位会话，
+# 因此前端不需要传 session_id。`GET /api/interview/session` 与客户端显式持有
+# session_id 属于 T-24/T-25。
+
+#: 会话 TTL（架构 §6.3：2 小时）
+SESSION_TTL_SECONDS = 2 * 60 * 60
 
 UPLOAD_DIR = "uploads/avatars"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+
+def _active_session(user_id: int) -> Optional[SessionSnapshot]:
+    """取该用户**当前活跃**（active 且未过期）的会话；没有则 `None`。
+
+    惰性判定：`expires_at <= now` 的行即便 `status` 仍是 `active`，
+    `get_active` 也不会返回它 —— 口径统一在存储层，路由不重复判断。
+    """
+    return get_session_store().get_active(user_id, utcnow_iso())
+
+
+def _no_session_response() -> JSONResponse:
+    """T-23：**没有进行中的会话 -> 409 + 指引**（不再静默降级）。
+
+    修复前 `/api/chat` 在没有会话时会**直接走通用 AI 对话分支** ——
+    任何登录用户只要不 start_interview，就能把该接口当免费的 DeepSeek 代理用
+    （Bug 1 里"白嫖额度"的另一条路径）。现在必须 409。
+
+    ⚠️ `detail` 保持**字符串**：前端是 `data.detail || '默认文案'` 直接渲染的，
+    换成对象会变成 React 的 "Objects are not valid as a React child"。
+    机器可读的信息另放 `code` / `hint` / `actions` 字段。
+    """
+    return JSONResponse(
+        status_code=409,
+        content={
+            "detail": "当前没有进行中的面试会话，请先开始面试",
+            "code": "no_active_session",
+            "hint": "请先调用 POST /api/start_interview 开始一场面试。"
+                    "如果你刚才在面试中（例如刷新了页面），当前版本需要重新开始。",
+            "actions": ["start_interview"],
+        },
+    )
+
+
+def _session_conflict_response() -> JSONResponse:
+    """T-23：已有活跃会话时的 409（原先会**静默覆盖**上一场）。
+
+    T-25 会在此基础上补充"过期行自愈"与"409 携带会话摘要"（ADR-022 R-10）。
+    """
+    return JSONResponse(
+        status_code=409,
+        content={
+            "detail": "你已有进行中的面试",
+            "code": "active_session_exists",
+            "hint": "同一时间只能有一场进行中的面试。"
+                    "请先完成它，或稍后使用放弃接口结束它。",
+            "actions": [],
+        },
+    )
+
+
+def _version_conflict_response(latest: Optional[SessionSnapshot]) -> JSONResponse:
+    """ADR-004 第 4 步：乐观锁冲突 -> 409，并带上**最新进度**供前端恢复。"""
+    return JSONResponse(
+        status_code=409,
+        content={
+            "detail": "面试状态已被其它请求更新，请刷新后重试",
+            "code": "version_conflict",
+            "hint": "同一场面试的并发写入只允许一个成功。"
+                    "请按返回的 current_index 重新同步进度后重发本条消息。",
+            "actions": ["refresh"],
+            "current_index": latest.current_index if latest else None,
+            "last_seq": latest.last_seq if latest else None,
+            "total": len(latest.questions) if latest else None,
+        },
+    )
+
+
+def _finish_session(snapshot: Optional[SessionSnapshot], report) -> None:
+    """评分成功后把会话置为 `finished` 并落库报告（ADR-004 报告路径）。
+
+    乐观锁冲突时**重试一次**（用最新 version）。这里的重试是安全的，
+    与 `/api/chat` 的"绝不重试"不矛盾：chat 的载荷是基于旧快照算出的
+    `user_answers` 整列，重放会**串题**；而报告只取决于刚生成的评分结果，
+    不随 version 变化。重试的目的是确保**锁一定被释放** ——
+    否则用户会被自己的会话锁到 TTL 结束。
+
+    **失败不抛出**：报告已经生成好了，不能因为落库失败就让用户拿不到结果。
+    """
+    if snapshot is None:
+        return
+    store = get_session_store()
+    payload = json.dumps(report, ensure_ascii=False)
+    try:
+        result = store.finish(snapshot.session_id, snapshot.version, payload,
+                              EndedReason.COMPLETED, utcnow_iso())
+        if not result.applied:
+            latest = store.get(snapshot.session_id)
+            if latest is not None and latest.is_active:
+                store.finish(latest.session_id, latest.version, payload,
+                             EndedReason.COMPLETED, utcnow_iso())
+    except StoreError as exc:
+        import logging
+        logging.getLogger("app.interview").warning(
+            "报告落库/置终态失败（会话 %s）：%s", snapshot.session_id, exc)
 
 
 # T-13 / FR-4.10：跳过词的**单一来源**。
@@ -56,101 +181,96 @@ def get_interview_config(current_user: User = Depends(get_current_user)):
 @router.post("/chat")
 async def chat(req: ChatRequest, current_user: User = Depends(require_user)):
     user_message = req.message.strip()
-    lower_msg = user_message.lower()
     is_skip = _is_skip_message(user_message)
 
     # T-04 / FR-2.4（Bug 1）：身份**一律取自令牌**，绝不再读请求体。
     # 修复前该接口无任何鉴权依赖，且用客户端自报的 user_id 取会话，
     # 导致未登录即可调用（白嫖 AI 额度）并读写他人的面试会话（串号）。
-    user_id = current_user.id
-    session = interview_sessions.get(user_id)
+    # T-23：会话改为从持久化存储按 user_id 解析成 **session_id**。
+    snapshot = _active_session(current_user.id)
+    if snapshot is None:
+        # 修复前这里会掉进下面的"通用 AI 对话"分支 ——
+        # 即任何登录用户不 start_interview 也能白嫖 AI 额度。现在必须 409。
+        return _no_session_response()
 
-    if session:
-        idx = session["current_index"]
-        questions = session["questions"]
-        statuses = session["question_status"]
-        if idx < len(questions) and not is_skip:
-            statuses[idx] = "answered"
-            session["user_answers"][idx] = user_message
-            try:
-                eval_prompt = f"""你是一名严格的技术面试官。用户刚回答了问题：「{questions[idx]}」
+    return await _chat_with_session(snapshot, user_message, is_skip)
+
+
+async def _chat_with_session(snapshot, user_message: str, is_skip: bool):
+    """ADR-004 的时序：**AI 调用在事务外，短事务只负责落库**。
+
+        1. 取快照（上面已完成）
+        2. 【事务外】调用 DeepSeek            <- 25~30s，不持任何写锁
+        3. 短事务 + 乐观锁写回；冲突返回 409，**绝不重试写**
+
+    修复前是"读内存字典 -> 改字典 -> 调 AI"，没有事务概念；
+    唯一的并发风险来自多 worker 各持一份字典，表现为**串题**。
+    """
+    idx = snapshot.current_index
+    questions = snapshot.questions
+    statuses = list(snapshot.question_status)
+    answers = list(snapshot.user_answers)
+    total = len(questions)
+
+    feedback = ""
+
+    if idx < total and not is_skip:
+        statuses[idx] = "answered"
+        answers[idx] = user_message
+        try:
+            eval_prompt = f'''你是一名严格的技术面试官。用户刚回答了问题：「{questions[idx]}」
 用户回答：{user_message[:800]}
 请用简短的一句话给出正面反馈（如"回答得不错"或指出明显缺陷），然后直接问下一个问题。
-不要额外解释，不要带编号。"""
-                resp = client.chat.completions.create(
-                    model="deepseek-chat",
-                    messages=[{"role": "system", "content": "你是严格的面试官，给出简短反馈后直接问下一个问题。"}, {"role": "user", "content": eval_prompt}],
-                    temperature=0.7, timeout=25,
-                )
-                feedback = resp.choices[0].message.content
-            except Exception:
-                feedback = ""
-            idx += 1
-        elif is_skip and idx < len(questions):
-            statuses[idx] = "skipped"
-            session["user_answers"][idx] = "[跳过] " + user_message
-            feedback = "好的，这个方向我们先跳过。"
-            idx += 1
-        else:
+不要额外解释，不要带编号。'''
+            resp = client.chat.completions.create(
+                model="deepseek-chat",
+                messages=[{"role": "system", "content": "你是严格的面试官，给出简短反馈后直接问下一个问题。"}, {"role": "user", "content": eval_prompt}],
+                temperature=0.7, timeout=25,
+            )
+            feedback = resp.choices[0].message.content
+        except Exception:
             feedback = ""
-            idx += 1
+        idx += 1
+    elif is_skip and idx < total:
+        statuses[idx] = "skipped"
+        answers[idx] = "[跳过] " + user_message
+        feedback = "好的，这个方向我们先跳过。"
+        idx += 1
+    else:
+        idx += 1
 
-        session["current_index"] = idx
-        if idx >= len(questions):
-            session["finished"] = True
-            return {"reply": (feedback + " " if feedback else "") + "我们的面试到此结束，感谢你的参与！", "finished": True}
+    # ---- 短事务：基于快照的**绝对期望值**写回（不是 current_index + 1）----
+    result = get_session_store().commit_turn(TurnCommit(
+        session_id=snapshot.session_id,
+        expected_version=snapshot.version,
+        current_index=idx,
+        question_status=statuses,
+        user_answers=answers,
+        # 客户端尚未传 seq（该契约在 T-26 前后引入），沿用原值 ——
+        # 不伪造假序号，否则幂等判定会错误地去重。
+        last_seq=snapshot.last_seq,
+        last_reply=None,
+        updated_at=utcnow_iso(),
+        now=utcnow_iso(),
+    ))
 
-        if not feedback:
-            next_q = questions[idx]
-            reply = next_q
-        else:
-            next_q = questions[idx]
-            reply = feedback + "\n\n" + next_q
-        return {"reply": reply, "current_index": idx, "finished": False}
+    if not result.applied:
+        # ADR-004 第 4 步：**不重试写**，把最新状态交给前端去 409。
+        # 用陈旧载荷覆盖会静默串题（答案落到错误题目上）。
+        latest = result.snapshot or _active_session(snapshot.user_id)
+        return _version_conflict_response(latest)
 
-    is_asking_interviewer = (
-        (user_message.rstrip('？').endswith('?') or user_message.rstrip('吗').endswith('吗'))
-        and any(word in lower_msg for word in ["你", "面试官", "请问", "能告诉我", "什么是", "怎么理解", "自我介绍", "不用", "需要", "可以先", "能不能", "可不可以"])
-    )
+    if idx >= total:
+        # 注意：**不**把 status 置为 finished —— 按 ADR-004，那是
+        # "报告生成成功"时的事。此处只是"题目问完了"，会话仍需保持 active
+        # 以便 generate_report 带 version 守卫写入报告。
+        return {"reply": (feedback + " " if feedback else "") +
+                         "我们的面试到此结束，感谢你的参与！", "finished": True}
 
-    system_prompt = f"你是一名严格的{req.role}岗位面试官。"
+    next_q = questions[idx]
+    reply = (feedback + "\n\n" + next_q) if feedback else next_q
+    return {"reply": reply, "current_index": idx, "finished": False}
 
-    if is_asking_interviewer:
-        system_prompt += " 候选人向你提出了一个问题或请求（比如要求先做自我介绍等）。你必须优先直接回应他的请求，自然地允许他表述，然后再继续提问。绝对不要忽略候选人的问题而直接抛出新问题。"
-
-    system_prompt += " 如果你的上一轮提问涉及某个技术点，候选人给出了有效回答，应针对该回答进行追问，每次只问一个问题。"
-
-    if is_skip:
-        system_prompt += " 面试者刚才表示不会回答当前问题或请求换题。请你用一句话表示已记录（如'好的，这个方向我们先跳过'），然后紧接着立刻提出一个全新的、与刚才题目方向完全不同的技术问题。不要在确认语之后等待回复，直接给出下一个问题。每次只问一个问题。"
-
-    system_prompt += " 注意：你最多只能问 10 个问题。当你感觉已经获取足够信息或问完第 10 个问题后，请用\"我们的面试到此结束，感谢你的参与！\"作为回复的结尾，系统会自动为你生成评估报告。"
-
-    if req.resume_context:
-        system_prompt += f" 以下是候选人的简历摘要：{req.resume_context}。"
-
-    if req.resume_questions:
-        system_prompt += f" 请优先按照以下问题列表的顺序依次提问：{' | '.join(req.resume_questions)}。完成列表后再根据回答追问。"
-
-    if not req.resume_context and not req.resume_questions:
-        system_prompt += " 请你从基础技术问题开始提问，逐步深入。"
-    try:
-        response = client.chat.completions.create(
-            model="deepseek-chat",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": req.message}
-            ],
-            temperature=0.7,
-        )
-        reply = response.choices[0].message.content
-        return {"reply": reply}
-    except Exception as e:
-        error_msg = str(e)
-        if "402" in error_msg or "balance" in error_msg.lower():
-            hint = "DeepSeek 账户余额不足，请充值或更换 API Key。"
-        else:
-            hint = f"AI 接口调用失败：{error_msg}"
-        return {"reply": hint}
 
 
 @router.post("/start_interview")
@@ -170,16 +290,27 @@ async def start_interview(
     if not questions_list:
         questions_list = generate_questions(resume_text)
 
-    session = {
-        "user_id": current_user.id,
-        "role": role,
-        "questions": questions_list,
-        "current_index": 0,
-        "question_status": ["pending"] * len(questions_list),
-        "user_answers": [""] * len(questions_list),
-        "finished": False,
-    }
-    interview_sessions[current_user.id] = session
+    now = utcnow_iso()
+    draft = SessionDraft(
+        session_id=uuid.uuid4().hex,
+        user_id=current_user.id,
+        role=role,
+        questions=questions_list,
+        question_status=["pending"] * len(questions_list),
+        user_answers=[None] * len(questions_list),
+        current_index=0,
+        created_at=now,
+        updated_at=now,
+        expires_at=iso_after(SESSION_TTL_SECONDS, now),
+    )
+    try:
+        snapshot = get_session_store().create(draft)
+    except ActiveSessionExists:
+        # T-23：把"静默覆盖上一场面试"变成**显式 409**。
+        # T-25 会在此前先做"过期行自愈"，并把会话摘要放进 409 响应体。
+        return _session_conflict_response()
+    except StoreError as exc:
+        raise HTTPException(status_code=500, detail="创建面试会话失败：%s" % exc)
 
     greeting = f"你好！我已分析了你的简历，准备了 {len(questions_list)} 个面试问题。让我们从第一个问题开始吧。\n\n{questions_list[0]}"
 
@@ -189,27 +320,52 @@ async def start_interview(
         "questions": questions_list,
         "current_index": 0,
         "total": len(questions_list),
+        # 新增字段（向后兼容）：T-24/T-25 之后客户端会显式持有它并回传。
+        "session_id": snapshot.session_id,
     }
 
 
 @router.post("/skip_question")
 async def skip_question(current_user: User = Depends(require_user)):
     user_id = current_user.id
-    session = interview_sessions.get(user_id)
-    if not session:
-        raise HTTPException(status_code=400, detail="没有活跃的面试会话")
-    idx = session["current_index"]
-    questions = session["questions"]
-    if idx >= len(questions):
+    snapshot = _active_session(current_user.id)
+    if snapshot is None:
+        # 修复前这里返回 400 —— 但"没有进行中的面试"是**状态冲突**而非参数错误，
+        # 且 400 不带指引，前端只能弹一句"没有活跃的面试会话"。
+        return _no_session_response()
+
+    idx = snapshot.current_index
+    questions = snapshot.questions
+    total = len(questions)
+    if idx >= total:
         return {"reply": "所有问题已结束，请点击结束面试生成报告。", "finished": True}
-    session["question_status"][idx] = "skipped"
-    session["user_answers"][idx] = "[跳过]"
+
+    statuses = list(snapshot.question_status)
+    answers = list(snapshot.user_answers)
+    statuses[idx] = "skipped"
+    answers[idx] = "[跳过]"
     idx += 1
-    session["current_index"] = idx
-    if idx >= len(questions):
-        session["finished"] = True
-        return {"reply": "已跳过。我们的面试到此结束，感谢你的参与！", "finished": True, "current_index": idx}
-    return {"reply": "好的，这个方向我们跳过。\n\n" + questions[idx], "finished": False, "current_index": idx}
+
+    result = get_session_store().commit_turn(TurnCommit(
+        session_id=snapshot.session_id,
+        expected_version=snapshot.version,
+        current_index=idx,
+        question_status=statuses,
+        user_answers=answers,
+        last_seq=snapshot.last_seq,
+        last_reply=None,
+        updated_at=utcnow_iso(),
+        now=utcnow_iso(),
+    ))
+    if not result.applied:
+        return _version_conflict_response(
+            result.snapshot or _active_session(snapshot.user_id))
+
+    if idx >= total:
+        return {"reply": "已跳过。我们的面试到此结束，感谢你的参与！",
+                "finished": True, "current_index": idx}
+    return {"reply": "好的，这个方向我们跳过。\n\n" + questions[idx],
+            "finished": False, "current_index": idx}
 
 
 @router.post("/generate_report")
@@ -219,13 +375,16 @@ async def generate_report(req: ReportRequest, current_user: User = Depends(requi
     ai_msgs = [m['content'] for m in req.messages if m['role'] == 'assistant']
     question_count = len(ai_msgs)
 
-    session = interview_sessions.get(current_user.id)
+    # T-23：会话状态改从持久化存储读（原先读进程内字典）。
+    # 注意：**评分输入仍以前端传来的 messages 为准** ——
+    # "改为以服务端会话为准"是 T-26 的契约变更，不在本任务范围。
+    snapshot = _active_session(current_user.id)
     question_status_note = ""
-    if session:
+    if snapshot:
         slist = []
-        for i, q in enumerate(session["questions"]):
-            s = session["question_status"][i]
-            slist.append(f"  Q{i+1}: {q} -> {s}")
+        for i, q in enumerate(snapshot.questions):
+            st = snapshot.question_status[i]
+            slist.append(f"  Q{i+1}: {q} -> {st}")
         question_status_note = "\n## 各问题回答状态：\n" + "\n".join(slist) + "\n（answered=已回答, skipped=跳过, pending=未答）请参考这些状态调整评分。"
 
     prompt = f"""你是一位极其严格的技术面试评估专家。请根据以下面试对话，对候选人进行冷酷、真实的评估。
@@ -275,7 +434,13 @@ async def generate_report(req: ReportRequest, current_user: User = Depends(requi
         )
         result_text = response.choices[0].message.content
         result = extract_json_from_response(result_text)
-        interview_sessions.pop(current_user.id, None)
+
+        # T-23：原先是 `interview_sessions.pop(user_id)` —— 用"删掉会话"来
+        # 释放"同一用户只能有一场进行中面试"的锁。持久化之后语义是
+        # **置为 finished**（ADR-004 报告路径：报告落库与置终态同事务）。
+        # 若此处不置终态，用户会在每场面试后被锁到 TTL 结束（2 小时）——
+        # 那是把 ADR-022R 明确要消除的问题重新引入。
+        _finish_session(snapshot, result)
         return result
     except Exception as e:
         return {

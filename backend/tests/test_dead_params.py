@@ -20,7 +20,6 @@ from fastapi.testclient import TestClient
 
 import main  # noqa: E402  —— 环境隔离由 tests/__init__.py 保证
 from models.schemas import ChatRequest, ReportRequest
-from routers.interview import interview_sessions
 from tests.support import bearer, create_test_user, delete_users, mint_token
 
 USERNAME = "t11_user"
@@ -34,10 +33,13 @@ class DeadParamSchemaTests(unittest.TestCase):
         fields = set(ChatRequest.model_fields)
         self.assertNotIn("action", fields, "ChatRequest.action 应已移除")
         self.assertNotIn("user_id", fields, "ChatRequest.user_id 应已移除")
-        self.assertEqual(
-            fields,
-            {"message", "role", "resume_context", "resume_questions"},
-        )
+        # T-23：role / resume_context / resume_questions 也成了死参数 ——
+        # 它们原先只服务于"/api/chat 无会话时走通用 AI 对话"那条分支，
+        # 该分支已被 409 + 指引取代（否则登录用户能白嫖 AI 额度）。
+        self.assertNotIn("role", fields, "ChatRequest.role 应随通用分支一起移除")
+        self.assertNotIn("resume_context", fields)
+        self.assertNotIn("resume_questions", fields)
+        self.assertEqual(fields, {"message"})
 
     def test_report_request_has_no_dead_fields(self):
         fields = set(ReportRequest.model_fields)
@@ -64,17 +66,17 @@ class DeadParamEndpointTests(unittest.TestCase):
         cls.client.__exit__(None, None, None)
 
     def setUp(self):
-        interview_sessions.clear()
+        clear_sessions()
         self.user_id = create_test_user(USERNAME, role="user")
         create_test_user(ADMIN, role="admin")
         self.token = mint_token(USERNAME, role="user")
 
     def tearDown(self):
-        interview_sessions.clear()
+        clear_sessions()
         delete_users([USERNAME, ADMIN])
 
     def _seed_session(self):
-        interview_sessions[self.user_id] = {
+        seed_session(self.user_id, {
             "user_id": self.user_id,
             "role": "后端开发",
             "questions": ["Q1", "Q2"],
@@ -82,7 +84,7 @@ class DeadParamEndpointTests(unittest.TestCase):
             "question_status": ["pending", "pending"],
             "user_answers": ["", ""],
             "finished": False,
-        }
+        })
 
     def test_chat_works_without_dead_params(self):
         self._seed_session()
@@ -106,9 +108,9 @@ class DeadParamEndpointTests(unittest.TestCase):
             )
         self.assertEqual(r.status_code, 200, r.text)
         # 身份来自令牌：推进的是自己的会话
-        self.assertEqual(interview_sessions[self.user_id]["current_index"], 1)
+        self.assertEqual(get_session(self.user_id).current_index, 1)
         # 伪造的 user_id 未创建任何会话
-        self.assertNotIn(123456, interview_sessions)
+        self.assertIsNone(get_session(123456))
 
     def test_generate_report_works_without_user_id(self):
         r = self.client.post(
@@ -133,3 +135,45 @@ class DeadParamEndpointTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+# --- T-23：会话改为经持久化存储读写（原先直接操作 `interview_sessions` 字典）---
+
+def seed_session(user_id, d):
+    """按旧字典的形状造一条会话，返回快照。"""
+    import uuid
+    from services.stores.base import SessionDraft, iso_after, utcnow_iso
+    from services.stores.factory import get_session_store
+
+    now = utcnow_iso()
+    questions = d.get("questions") or ["T23 占位题"]
+    draft = SessionDraft(
+        session_id=d.get("session_id") or uuid.uuid4().hex,
+        user_id=user_id,
+        role=d.get("role", "后端开发"),
+        questions=list(questions),
+        question_status=list(d.get("question_status",
+                                   ["pending"] * len(questions))),
+        user_answers=list(d.get("user_answers", [None] * len(questions))),
+        current_index=d.get("current_index", 0),
+        created_at=now, updated_at=now, expires_at=iso_after(7200, now),
+    )
+    return get_session_store().create(draft)
+
+
+def get_session(user_id):
+    """取该用户当前活跃会话的快照；没有返回 None。"""
+    from services.stores.base import utcnow_iso
+    from services.stores.factory import get_session_store
+    return get_session_store().get_active(user_id, utcnow_iso())
+
+
+def clear_sessions():
+    """清掉测试用户的所有会话（等价于旧的 `interview_sessions.clear()`）。
+
+    直接删表内容而不是逐个 abandon —— 测试要的是"干净起点"。
+    """
+    from sqlalchemy import text
+    import database
+    with database.engine.begin() as conn:
+        conn.execute(text("DELETE FROM interview_sessions"))
