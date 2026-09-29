@@ -47,6 +47,7 @@ from typing import Any, Optional
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
+from services.stores._sqlite_tx import begin_write
 from services.stores.base import (
     ActiveSessionExists,
     CommitResult,
@@ -201,6 +202,7 @@ class SQLiteSessionStore(object):
     def abandon_expired_for_user(self, user_id: int, now: str) -> int:
         s = self._session()
         try:
+            begin_write(s)   # T-15 修订：写路径显式取写锁
             result = s.execute(
                 text(
                     "UPDATE interview_sessions "
@@ -228,6 +230,7 @@ class SQLiteSessionStore(object):
     def create(self, draft: SessionDraft) -> SessionSnapshot:
         s = self._session()
         try:
+            begin_write(s)   # T-15 修订：写路径显式取写锁
             s.execute(
                 text(
                     "INSERT INTO interview_sessions "
@@ -294,6 +297,7 @@ class SQLiteSessionStore(object):
     def commit_turn(self, commit) -> CommitResult:
         s = self._session()
         try:
+            begin_write(s)   # T-15 修订：写路径显式取写锁
             changed = self._guarded_update(
                 s,
                 "UPDATE interview_sessions "
@@ -333,6 +337,7 @@ class SQLiteSessionStore(object):
         self._validate_reason(ended_reason)
         s = self._session()
         try:
+            begin_write(s)   # T-15 修订：写路径显式取写锁
             changed = self._guarded_update(
                 s,
                 "UPDATE interview_sessions "
@@ -365,6 +370,7 @@ class SQLiteSessionStore(object):
         self._validate_reason(ended_reason)
         s = self._session()
         try:
+            begin_write(s)   # T-15 修订：写路径显式取写锁
             changed = self._guarded_update(
                 s,
                 "UPDATE interview_sessions "
@@ -389,6 +395,7 @@ class SQLiteSessionStore(object):
     def abandon_all_expired(self, now: str) -> int:
         s = self._session()
         try:
+            begin_write(s)   # T-15 修订：写路径显式取写锁
             result = s.execute(
                 text(
                     "UPDATE interview_sessions "

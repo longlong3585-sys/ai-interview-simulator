@@ -22,10 +22,34 @@ if BACKEND_DIR not in sys.path:
 
 import database  # noqa: E402  —— 环境隔离由 tests/__init__.py 保证
 from database import InterviewRecord, SessionLocal, User  # noqa: E402
+from services.stores._sqlite_tx import begin_write  # noqa: E402
 
 
 def pragma(conn, name):
     return conn.execute(text("PRAGMA " + name)).scalar()
+
+
+def raw_insert(db_path, tag):
+    """用一个短 busy_timeout 的**原始连接**尝试写入；被挡返回 False。
+
+    这是判断"写锁在谁手里"的行为探针 —— 不依赖日志，只看另一个连接能不能写。
+    """
+    conn = sqlite3.connect(db_path, timeout=0.2)
+    try:
+        conn.execute(
+            "INSERT INTO users (username, email, role, is_active) VALUES (?,?,?,1)",
+            (tag, tag + "@t.local", "user"),
+        )
+        conn.commit()
+        return True
+    except sqlite3.OperationalError:
+        return False
+    finally:
+        conn.close()
+
+
+def test_db_path():
+    return database.DATABASE_URL.replace("sqlite:///", "")
 
 
 class _FreshDbMixin(object):
@@ -174,10 +198,7 @@ class EngineConfigTests(_FreshDbMixin, unittest.TestCase):
     def test_every_new_connection_gets_pragmas(self):
         """PRAGMA 是**连接级**的，必须每个新连接都设置。
 
-        注意：**逐个**开关连接，不能同时持有多个。
-        因为 BEGIN IMMEDIATE 会让每个事务（含只读）都持写锁，
-        同时持有两个连接的事务必然互相阻塞 —— 那是本设计的已知代价，
-        由 test_concurrent_transactions_serialize 单独记录，不在这里混测。
+        T-15 修订后读不再持写锁，因此这里可以放心地逐个开关连接。
         """
         for _ in range(3):
             conn = database.engine.connect()
@@ -188,51 +209,90 @@ class EngineConfigTests(_FreshDbMixin, unittest.TestCase):
             finally:
                 conn.close()
 
-    def test_concurrent_transactions_serialize(self):
-        """**如实记录已知代价**：BEGIN IMMEDIATE 让每个事务（含只读）都申请写锁，
-        因此**经由本引擎的并发事务会串行化**。
+    def test_concurrent_reads_do_not_block_each_other(self):
+        """**T-15 修订的核心断言**：读事务不再互相阻塞（也不再被别人挡）。
 
-        精确表述（实测校正）：
-          - WAL 下 RESERVED 锁**不阻塞**其它连接的纯读（读并发仍然存在）
-          - 但本引擎的每个事务都会 BEGIN IMMEDIATE，所以两个 API 请求
-            （即使都是只读）会互相排队
-          - 外部只用 sqlite3 纯读的连接不受影响
-
-        这是 ADR-002 的取舍：换来"读事务升级为写"时不会出现 SQLITE_BUSY
-        且 busy_timeout 失效。本项目单机低并发、事务毫秒级，可接受。
-        若将来读多写多，应改为"仅写路径显式 BEGIN IMMEDIATE"。
+        修复前全局 `BEGIN IMMEDIATE`，连只读事务都持写锁 → 两个只读请求
+        会互相排队，且同一请求内"鉴权读 + 业务写"必然自锁。
+        现在读走语句级自动提交，因此**三个并发只读连接互不阻塞**。
         """
-        c1 = database.engine.connect()
+        conns = []
         try:
-            c1.execute(text("SELECT 1"))  # c1 已持写锁
+            for _ in range(3):
+                c = database.engine.connect()
+                conns.append(c)
+                c.execute(text("SELECT 1"))   # 每个都执行一次读
 
-            # 另一连接尝试申请写锁（模拟第二个 API 请求）
-            raw = sqlite3.connect(
-                database.DATABASE_URL.replace("sqlite:///", ""), timeout=0.2
-            )
+            # 关键：所有读都没持写锁 —— 另一个连接此时能立刻取写锁
+            raw = sqlite3.connect(test_db_path(), timeout=0.2)
             try:
-                with self.assertRaises(sqlite3.OperationalError) as ctx:
-                    raw.execute("BEGIN IMMEDIATE")
-                self.assertIn("locked", str(ctx.exception).lower())
+                raw.execute("BEGIN IMMEDIATE")
+                raw.execute("ROLLBACK")
             finally:
                 raw.close()
+        finally:
+            for c in conns:
+                c.close()
 
-            # 对照：纯读不受 RESERVED 锁影响（WAL 的读并发仍然有效）
-            reader = sqlite3.connect(
-                database.DATABASE_URL.replace("sqlite:///", ""), timeout=0.2
+    def test_read_transaction_does_not_block_a_writer(self):
+        """读不该挡写 —— 这正是选 WAL 的理由，也是 T-23 死锁的根因。"""
+        sa_conn = database.engine.connect()
+        try:
+            sa_conn.execute(text("SELECT 1"))       # 开启了事务（SQLAlchemy 层）
+            self.assertTrue(
+                raw_insert(test_db_path(), "t15_read_no_block"),
+                "只读期间另一连接无法写入 —— 读仍在持写锁，"
+                "同一请求内的『鉴权读 + 业务写』会自锁",
             )
+        finally:
+            sa_conn.close()
+
+    def test_explicit_write_lock_blocks_other_writers(self):
+        """**写路径仍必须取写锁**：显式 BEGIN IMMEDIATE 之后，
+        另一个写者必须被挡住（ADR-004 的并发控制没有丢，只是搬了位置）。"""
+        sa_conn = database.engine.connect()
+        try:
+            begin_write(sa_conn)
+            self.assertFalse(
+                raw_insert(test_db_path(), "t15_write_blocked"),
+                "显式 BEGIN IMMEDIATE 之后别的连接仍能写 —— 写锁没生效",
+            )
+        finally:
+            sa_conn.close()
+
+    def test_write_lock_is_released_after_commit(self):
+        sa_conn = database.engine.connect()
+        try:
+            begin_write(sa_conn)
+            sa_conn.execute(text(
+                "INSERT INTO users (username, email, role, is_active) "
+                "VALUES ('t15_commit', 't15_commit@t.local', 'user', 1)"))
+            sa_conn.commit()
+        finally:
+            sa_conn.close()
+        self.assertTrue(
+            raw_insert(test_db_path(), "t15_after_commit"),
+            "提交之后写锁没释放",
+        )
+
+    def test_reads_still_see_wal_concurrency(self):
+        """对照：WAL 下 RESERVED 锁不阻塞纯读（这条一直成立，防止改坏）。"""
+        sa_conn = database.engine.connect()
+        try:
+            begin_write(sa_conn)     # 持写锁
+            reader = sqlite3.connect(test_db_path(), timeout=0.2)
             try:
                 reader.execute("SELECT COUNT(*) FROM users").fetchone()
             finally:
                 reader.close()
         finally:
-            c1.close()
+            sa_conn.close()
 
 
 class BeginImmediateTests(unittest.TestCase):
-    """核心：验证发出的是 BEGIN IMMEDIATE 而不是 BEGIN (deferred)。
+    """T-15 修订后：`BEGIN IMMEDIATE` 由**写路径显式调用**，不再是全局行为。
 
-    判别依据是**行为差异**，不依赖日志：
+    判别依据仍然是**行为差异**，不依赖日志：
       DEFERRED  : 只读事务不持锁 → 另一连接此时能写入
       IMMEDIATE : 事务一开始就取 RESERVED 锁 → 另一连接写入被挡住
     """
@@ -263,24 +323,42 @@ class BeginImmediateTests(unittest.TestCase):
         finally:
             conn.close()
 
-    def test_readonly_transaction_holds_write_lock(self):
+    def test_begin_write_takes_the_write_lock_immediately(self):
+        """**核心判别**：`begin_write()` 之后，另一连接写入必须被挡住。
+
+        若去掉 `begin_write`（或它退化成 deferred），这条会失败 ——
+        这正是"写路径确实取了写锁"的行为证据。
+        """
         sa_conn = database.engine.connect()
         try:
-            sa_conn.execute(text("SELECT 1"))  # 开启事务
-            blocked = not self._raw_insert("t15_blocked")
+            begin_write(sa_conn)
             self.assertTrue(
-                blocked,
-                "只读事务期间另一连接仍能写入 —— 说明发的是 BEGIN (deferred)，"
-                "BEGIN IMMEDIATE 未生效；ADR-004 的并发控制会失去保障",
+                not self._raw_insert("t15_blocked"),
+                "begin_write() 之后另一连接仍能写入 —— 说明取的不是 IMMEDIATE 锁；"
+                "ADR-004 的并发控制会失去保障",
             )
         finally:
             sa_conn.close()
+
+    def test_begin_write_works_as_the_very_first_statement(self):
+        """**回归用例**：`begin_write` 必须是 Session 上第一个动作也不能报错。
+
+        实测踩到过：直接 `session.execute(text("BEGIN IMMEDIATE"))` 作为
+        首条语句会报 `cannot start a transaction within a transaction`，
+        因为取连接那一步已经开了事务。`begin_write` 内部先归零再取锁。
+        """
+        s = SessionLocal()
+        try:
+            begin_write(s)                     # 首条动作
+            s.commit()
+        finally:
+            s.close()
 
     def test_after_commit_other_connection_can_write(self):
         """对照组：事务结束后，其它连接应立刻能写（证明上一条不是别的原因造成的阻塞）。"""
         sa_conn = database.engine.connect()
         try:
-            sa_conn.execute(text("SELECT 1"))
+            begin_write(sa_conn)
         finally:
             sa_conn.close()  # close 即回滚/释放
         self.assertTrue(

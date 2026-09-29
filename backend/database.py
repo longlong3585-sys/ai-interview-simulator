@@ -86,7 +86,8 @@ if _IS_SQLITE:
         # 注意：对本地 SQLite 而言 pool_pre_ping 意义有限（无网络中断），
         # 保留是为了将来切到 PostgreSQL 时行为一致。
         pool_pre_ping=True,
-        # **必须**：交出事务控制权给下面的 begin 事件，否则发不出 BEGIN IMMEDIATE
+        # **必须**：让 DBAPI 进入自动提交模式，把"何时 BEGIN"的决定权交给
+        # 我们自己（写路径显式 BEGIN IMMEDIATE），而不是由 pysqlite 隐式决定。
         isolation_level=None,
     )
 
@@ -94,16 +95,21 @@ if _IS_SQLITE:
     def _on_connect(dbapi_conn, connection_record):
         _apply_sqlite_pragmas(dbapi_conn, connection_record)
 
-    @event.listens_for(engine, "begin")
-    def _on_begin(conn):
-        """让每个事务都以 BEGIN IMMEDIATE 开始，立即取得写锁。
-
-        取舍（如实记录）：这会让**只读事务也持写锁**，从而串行化全部数据库访问。
-        换来的是：读事务升级为写时不会出现 SQLITE_BUSY 且 busy_timeout 失效的情况。
-        本项目单机、低并发、事务都是毫秒级，串行化代价可接受（ADR-002 的裁决）。
-        若将来读多写多，应改为"仅写路径显式 BEGIN IMMEDIATE"。
-        """
-        conn.exec_driver_sql("BEGIN IMMEDIATE")
+    # ------------------------------------------------------------------
+    # T-15 修订（用户裁决，见 docs/02-architecture-v2.md 的 ADR-002R）：
+    # **不再**为每个事务无条件发 `BEGIN IMMEDIATE`。
+    #
+    # 首版那样做是为了满足 ADR-004 的并发控制，但代价是"连只读事务也持写锁" ——
+    # 任何请求从第一条 SELECT 起就独占写锁直到请求结束。T-23 把存储层接进路由后
+    # 直接炸：`get_current_user` 先 SELECT 拿锁，处理函数里再调存储层要写，
+    # **同一请求内自锁** → 等满 busy_timeout 后 database is locked。
+    # 而 WAL 的设计初衷恰恰是"读不阻塞写、写不阻塞读"。
+    #
+    # 现在：**写路径显式取锁**（services/stores/_sqlite_tx.begin_write），
+    # 读路径走语句级自动提交、不持写锁。ADR-004 的论证没丢，只是搬到真正
+    # 需要它的地方 —— 写事务在**开始前**就取写锁，因此不存在"读→写升级"
+    # 那一步，也就不会出现 SQLITE_BUSY 绕过 busy handler 的情况。
+    # ------------------------------------------------------------------
 else:
     engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 

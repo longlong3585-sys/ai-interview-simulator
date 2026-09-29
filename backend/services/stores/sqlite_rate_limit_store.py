@@ -35,6 +35,8 @@ import logging
 
 from sqlalchemy import text
 
+from services.stores._sqlite_tx import begin_write
+
 logger = logging.getLogger("app.stores.rate_limit")
 
 
@@ -80,6 +82,7 @@ class SQLiteRateLimitStore(object):
         """记录一次失败。**只在失败时调用**（成功路径不得写入，见模块说明）。"""
         s = self._session()
         try:
+            begin_write(s)   # T-15 修订：写路径显式取写锁
             s.execute(
                 text("INSERT INTO auth_attempts (ip, attempted_at) VALUES (:ip, :at)"),
                 {"ip": ip, "at": at},
@@ -95,6 +98,7 @@ class SQLiteRateLimitStore(object):
         """
         s = self._session()
         try:
+            begin_write(s)   # T-15 修订：写路径显式取写锁
             s.execute(text("DELETE FROM auth_attempts WHERE ip = :ip"), {"ip": ip})
             s.commit()
         finally:
@@ -104,6 +108,7 @@ class SQLiteRateLimitStore(object):
         """删除 `before` **之前**的记录，返回删除行数（T-22 定时清理调用）。"""
         s = self._session()
         try:
+            begin_write(s)   # T-15 修订：写路径显式取写锁
             result = s.execute(
                 text("DELETE FROM auth_attempts WHERE attempted_at < :before"),
                 {"before": before},

@@ -56,6 +56,7 @@ from typing import Optional
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
+from services.stores._sqlite_tx import begin_write
 from services.stores.base import StoreError
 
 logger = logging.getLogger("app.stores.captcha")
@@ -91,6 +92,7 @@ class SQLiteCaptchaStore(object):
         """
         s = self._session()
         try:
+            begin_write(s)   # T-15 修订：写路径显式取写锁
             s.execute(
                 text(
                     "INSERT INTO captcha_store (captcha_id, code, expires_at, used) "
@@ -120,6 +122,7 @@ class SQLiteCaptchaStore(object):
 
         s = self._session()
         try:
+            begin_write(s)   # T-15 修订：写路径显式取写锁
             result = s.execute(
                 text(
                     "UPDATE captcha_store SET used = 1 "
@@ -144,6 +147,7 @@ class SQLiteCaptchaStore(object):
         """
         s = self._session()
         try:
+            begin_write(s)   # T-15 修订：写路径显式取写锁
             result = s.execute(
                 text("DELETE FROM captcha_store WHERE expires_at <= :now"),
                 {"now": now},

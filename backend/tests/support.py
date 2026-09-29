@@ -61,11 +61,10 @@ def build_engine(db_path):
         isolation_level=None,
     )
     event.listen(engine, "connect", database._apply_sqlite_pragmas)
-
-    @event.listens_for(engine, "begin")
-    def _on_begin(conn):
-        conn.exec_driver_sql("BEGIN IMMEDIATE")
-
+    # ⚠️ T-15 修订：**不再**注册全局 `begin` -> `BEGIN IMMEDIATE` 监听器。
+    # 写路径由 `services/stores/_sqlite_tx.begin_write` 显式取锁。
+    # 这里若还留着全局监听器，测试就会跑在一套与生产不同的并发语义上，
+    # 并且会**掩盖** T-23 遇到的那个"同一请求内自锁"问题。
     return engine
 
 

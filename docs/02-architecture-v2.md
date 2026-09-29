@@ -370,6 +370,35 @@ pysqlite 的 `commit()` 仍然有效（其内部查 `sqlite3_get_autocommit()` �
   同一文件上的 `PRAGMA journal_mode=DELETE`（实测 `database is locked`）；
   独立文件同时多验证了"**全新空库也会被设为 WAL**"。
 
+**⚠️ 第二轮修订（T-23 实测触发，用户裁决「仅写路径取锁」）**
+
+| 项 | 修订前（T-15 首版） | **修订后** |
+|---|---|---|
+| `BEGIN IMMEDIATE` 适用范围 | **全局**：`begin` 事件里无条件发 | **仅写路径**：`services/stores/_sqlite_tx.begin_write` 显式调用 |
+| 只读事务 | 也持写锁 → 同一请求内「鉴权读 + 业务写」**必然自锁** | 不持写锁，走语句级自动提交 |
+| 并发读 | 经由本引擎的读**互相排队** | 互不阻塞（WAL 的读并发终于用上了） |
+| 写保护 | 有效 | **仍然有效**（写事务开始前就取锁） |
+
+**ADR-004 的论证没有丢，只是收窄了适用对象。** 原文说"读事务升级为写时
+SQLite 返回 `SQLITE_BUSY` 且不调用 busy handler，导致 `busy_timeout` 失效"
+—— 这条**只对写路径成立**：用 `BEGIN IMMEDIATE` 在事务**开始前**取写锁，
+就没有"升级"这一步。原先把该论证套用到全部事务，代价是"只读也持写锁"，
+既浪费了 WAL 的读并发，又制造了死锁：T-23 把存储层接进路由后，
+`get_current_user` 的 SELECT 拿住写锁，处理函数里的 `store.create()`
+等满 15 秒后 `database is locked`。
+
+**实现上的一个坑（已写进 `_sqlite_tx.py`）**：`BEGIN IMMEDIATE` 作为 Session 的
+**第一条语句**直接 `session.execute()` 会报
+`cannot start a transaction within a transaction`（取连接那一步已把事务开起来了；
+执行过别的语句之后再发反而正常，因此极易漏测）。`begin_write` 因此落到原始
+DBAPI 连接上执行，并先把可能已存在的事务归零。
+
+**已知代价**：写事务之间仍串行（SQLite 单写者模型，固有）；
+多语句写的原子性依赖写方法**显式**调用 `begin_write`（三个仓储的 12 个写方法
+已全覆盖，并有清单式用例守住）。
+
+---
+
 **第二轮探针结果（6 个缺陷全部被抓住）**：
 
 | 探针（删除的配置） | 单元测试失败数 | 验收工具失败数 |
